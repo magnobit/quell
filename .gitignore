@@ -1,0 +1,20 @@
+# Build outputs (root-level binaries only)
+/quell
+/quell.exe
+*.exe
+*.test
+
+# Go module cache
+/vendor/
+coverage.out
+*.out
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

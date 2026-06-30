@@ -1,0 +1,7 @@
+// Bell pair — creates maximum quantum entanglement between 2 qubits
+// Run: quell run bell.quell
+// Expected: 50% |00⟩, 50% |11⟩
+
+H 0
+CNOT 0 1
+MEASURE

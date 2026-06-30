@@ -1,0 +1,11 @@
+// Quantum teleportation — transfers qubit state using entanglement
+// 3 qubits: q0 = state to teleport, q1+q2 = Bell pair channel
+
+H 1
+CNOT 1 2
+CNOT 0 1
+H 0
+MEASURE 0
+MEASURE 1
+CX 1 2
+CZ 0 2
