@@ -1,0 +1,8 @@
+// GHZ state — 3-qubit maximally entangled state
+// |GHZ⟩ = (|000⟩ + |111⟩) / √2
+// Used in quantum error correction and multi-party entanglement
+
+H 0
+CNOT 0 1
+CNOT 0 2
+MEASURE

@@ -1,5 +1,9 @@
 # Quell
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
+[![Made by Magnobit](https://img.shields.io/badge/Made%20by-Magnobit-6C3BD1.svg)](https://magnobit.com)
+
 **The simplest quantum programming language. Backend-agnostic, open source.**
 
 Write quantum circuits once. Run them on any platform — IBM, AWS, Google, or local simulator.
@@ -184,28 +188,54 @@ We also believe learning quantum computing should be as simple as opening a brow
 
 ```
 quell/
-├── cmd/quell/        — CLI
+├── cmd/quell/        — CLI entry point
+├── compile/          — Public Go API (import "github.com/magnobit/quell/compile")
 ├── internal/
-│   ├── parser/       — Quell → AST
-│   ├── compiler/     — AST → OpenQASM / Qiskit / Cirq / Braket
+│   ├── parser/       — Quell → AST (circuit IR)
+│   ├── compiler/     — AST → OpenQASM 3 / Qiskit / Cirq / Braket
 │   └── config/       — quell.config.yml reader
-├── examples/         — Bell pair, Grover, Teleportation
-└── SPEC.md           — Full language specification
+├── examples/         — Bell pair, Grover, Teleportation, named qubits
+├── SPEC.md           — Full language specification
+├── TRADEMARK.md      — Trademark usage policy
+├── CONTRIBUTING.md   — How to contribute
+├── SECURITY.md       — Vulnerability reporting
+└── NOTICE            — Attribution requirements
 ```
+
+---
+
+## Use as a Go library
+
+```go
+import "github.com/magnobit/quell/compile"
+
+result, err := compile.Compile(`
+  H 0
+  CNOT 0 1
+  MEASURE
+`, compile.Qiskit)
+```
+
+Targets: `compile.Qiskit`, `compile.OpenQASM`, `compile.Cirq`, `compile.Braket`
 
 ---
 
 ## Contributing
 
-Quell is early. The most useful contributions right now:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Quick checklist:
 
-1. New compile targets (Quil, QASM3)
-2. More example circuits
-3. Language server (LSP for VSCode)
-4. Test suite for compiler output
+- Every new gate must be implemented in all four compile targets
+- Run `go test ./...` before submitting
+- Add `// Copyright 2026 Magnobit. All rights reserved.` to new files
 
 ---
 
 ## License
 
-MIT — [Magnobit](https://www.magnobit.com)
+Apache 2.0 — see [LICENSE](LICENSE)
+
+Copyright 2026 [Magnobit](https://magnobit.com)
+
+> **Trademark notice:** "Quell" and the Quell hexagon logo are trademarks of Magnobit, Inc.
+> The Apache 2.0 license covers the source code; the trademarks are not included.
+> See [TRADEMARK.md](TRADEMARK.md) for usage guidelines.

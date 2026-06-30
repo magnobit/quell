@@ -1,0 +1,8 @@
+// Named qubits — use descriptive names instead of indices
+// The compiler maps names to 0-indexed integers automatically
+
+qubit alice, bob
+
+H alice          // put alice in superposition
+CNOT alice bob   // entangle alice and bob
+MEASURE
