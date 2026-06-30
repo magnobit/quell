@@ -26,4 +26,4 @@ WORKDIR /workspace
 COPY --from=builder /quell /usr/local/bin/quell
 
 ENTRYPOINT ["quell"]
-CMD ["help"]
+CMD ["serve"]

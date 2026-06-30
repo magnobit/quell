@@ -19,7 +19,7 @@ import (
 	"github.com/magnobit/quell/internal/parser"
 )
 
-const version = "0.1.0"
+const version = "0.0.2"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +32,8 @@ func main() {
 		fmt.Println("quell " + version)
 	case "help", "--help", "-h":
 		printHelp()
+	case "serve":
+		cmdServe()
 	case "run":
 		cmdRun()
 	case "compile":
@@ -281,6 +283,7 @@ func printHelp() {
 	fmt.Print(`Quell — backend-agnostic quantum circuit language
 
 Usage:
+  quell serve                           Start HTTP compile server (PORT env or --port 8081)
   quell run <file.quell>                Run circuit (local sim or configured backend)
   quell compile <file.quell>            Compile to OpenQASM (default)
     --target openqasm|qiskit|cirq|braket
