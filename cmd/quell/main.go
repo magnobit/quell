@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/magnobit/quell/internal/backends"
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/config"
 	"github.com/magnobit/quell/internal/parser"
@@ -54,18 +55,45 @@ func cmdRun() {
 	must(err, "parse error")
 
 	cfg := loadConfig()
-	fmt.Printf("Running on backend: %s\n", cfg.Backend)
+	fmt.Printf("Backend : %s\n", cfg.Backend)
+	fmt.Printf("Qubits  : %d\n", circ.NumQubits)
+	fmt.Printf("Gates   : %d\n\n", len(circ.Instructions))
 
-	if cfg.Backend == "local" {
+	switch cfg.Backend {
+	case "local", "":
 		out, err := compiler.Compile(circ, compiler.TargetOpenQASM)
 		must(err, "compile error")
-		fmt.Println("\n--- OpenQASM output ---")
+		fmt.Println("--- OpenQASM 3 ---")
 		fmt.Println(out)
-		fmt.Printf("\n%d qubits, %d instructions\n", circ.NumQubits, len(circ.Instructions))
-		fmt.Println("\n[Local simulation coming in v0.2 — use QubitLabs playground for now]")
-		fmt.Println("https://qubitlabs.magnobit.com")
-	} else {
-		fatalf("hardware backends available in v0.2 — set backend: local for now")
+		fmt.Println("Tip: use QubitLabs playground for browser simulation →")
+		fmt.Println("     https://qubitlabs.magnobit.com")
+
+	case "ibm":
+		qasm3, err := compiler.Compile(circ, compiler.TargetOpenQASM)
+		must(err, "compile error")
+		fmt.Println("  Compiled to OpenQASM 3, submitting to IBM Quantum…")
+		result, err := backends.RunIBM(&cfg.IBM, qasm3, circ.NumQubits)
+		must(err, "IBM run error")
+		result.Print()
+
+	case "aws":
+		qasm3, err := compiler.Compile(circ, compiler.TargetOpenQASM)
+		must(err, "compile error")
+		fmt.Println("  Compiled to OpenQASM 3, submitting to AWS Braket…")
+		result, err := backends.RunBraket(&cfg.AWS, qasm3)
+		must(err, "Braket run error")
+		result.Print()
+
+	case "google":
+		qasm3, err := compiler.Compile(circ, compiler.TargetOpenQASM)
+		must(err, "compile error")
+		fmt.Println("  Compiled to OpenQASM 3, submitting to Google Quantum Engine…")
+		result, err := backends.RunGoogle(&cfg.Google, qasm3)
+		must(err, "Google run error")
+		result.Print()
+
+	default:
+		fatalf("unknown backend %q — valid options: local, ibm, aws, google", cfg.Backend)
 	}
 }
 

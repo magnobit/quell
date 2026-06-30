@@ -42,6 +42,7 @@ type GCPConfig struct {
 	Project   string `yaml:"project"`
 	Processor string `yaml:"processor"`
 	Shots     int    `yaml:"shots"`
+	KeyFile   string `yaml:"key_file"` // path to service account JSON
 }
 
 type RigettiConfig struct {

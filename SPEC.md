@@ -59,6 +59,24 @@ H 0       // 1-qubit circuit
 H 2       // 3-qubit circuit (qubits 0, 1, 2 all allocated)
 ```
 
+### Named qubits
+
+Qubits can be given descriptive names using the `qubit` declaration. Names map to 0-indexed integers in declaration order.
+
+```quell
+qubit alice, bob
+
+H alice        // same as H 0
+CNOT alice bob // same as CNOT 0 1
+MEASURE
+```
+
+Rules:
+- `qubit` declarations must appear before the first gate that uses the name
+- Names are case-sensitive
+- Mixing named and indexed qubits in the same file is supported; indices pick up after the last declared named qubit
+- Multiple names can be declared on one line (comma-separated) or across multiple `qubit` lines
+
 ### Whitespace
 
 Leading and trailing whitespace is ignored. Blank lines are ignored. Multiple spaces between tokens are collapsed.
@@ -118,6 +136,7 @@ Leading and trailing whitespace is ignored. Blank lines are ignored. Multiple sp
 | MEASURE | `MEASURE` | Measure all qubits |
 | MEASURE | `MEASURE q` | Measure qubit q |
 | MEASURE | `MEASURE q0 q1 …` | Measure listed qubits |
+| M | `M` | Alias for `MEASURE` — identical in all compile targets |
 
 ---
 
@@ -226,7 +245,7 @@ circuit.probability()
 ```
 quell run <file>              Run circuit on configured backend
 quell compile <file>          Compile to configured target
-  --target openqasm|qiskit|cirq|braket|quil
+  --target openqasm|qiskit|cirq|braket
   --config path/to/quell.config.yml
   --output out.py
 quell ask "<question>"        AI assistant (requires API key)
@@ -252,7 +271,8 @@ RX 1.5707963 0    // RX(π/2) on qubit 0
 
 ## Roadmap
 
-- [ ] Named qubits: `qubit alice, bob` then `H alice`
+- [x] Named qubits: `qubit alice, bob` then `H alice` ✅ v0.0.1
+- [x] `M` alias for `MEASURE` ✅ v0.0.1
 - [ ] Classical registers and conditional gates
 - [ ] Subroutines / gate definitions
 - [ ] Parameterized circuits
