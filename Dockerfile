@@ -25,8 +25,5 @@ WORKDIR /workspace
 
 COPY --from=builder /quell /usr/local/bin/quell
 
-# Mount your .quell files and quell.config.yml here
-VOLUME ["/workspace"]
-
 ENTRYPOINT ["quell"]
 CMD ["help"]
