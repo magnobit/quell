@@ -6,12 +6,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/parser"
 )
+
+const maxRequestBytes = 1 << 20 // 1 MB
 
 func cmdServe() {
 	port := os.Getenv("PORT")
@@ -50,11 +54,35 @@ func cmdServe() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 
+		// Panic recovery — a compiler bug must not crash the server
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("compile panic: %v\n%s", rec, debug.Stack())
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("internal compiler error: %v", rec),
+				})
+			}
+		}()
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+
 		var req struct {
 			Code   string `json:"code"`
 			Target string `json:"target"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			status := http.StatusBadRequest
+			msg := "invalid request body"
+			if err.Error() == "http: request body too large" {
+				status = http.StatusRequestEntityTooLarge
+				msg = fmt.Sprintf("request body exceeds %d bytes", maxRequestBytes)
+			}
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]string{"error": msg})
+			return
+		}
+		if req.Code == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "code is required"})
 			return
@@ -68,14 +96,20 @@ func cmdServe() {
 		circ, err := parser.Parse(req.Code)
 		if err != nil {
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":     err.Error(),
+				"errorType": "parse",
+			})
 			return
 		}
 
 		result, err := compiler.Compile(circ, target)
 		if err != nil {
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":     err.Error(),
+				"errorType": "compile",
+			})
 			return
 		}
 
