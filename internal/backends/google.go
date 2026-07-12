@@ -1,5 +1,4 @@
-// Copyright 2026 Magnobit. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Magnobit, Inc. All rights reserved.
 
 package backends
 
@@ -60,7 +59,7 @@ func RunGoogle(cfg *config.GCPConfig, qasm3 string) (*RunResult, error) {
 	}
 
 	// Create and run a job on the program
-	jobName, err := googleCreateJob(token, cfg.Project, programName, cfg.Processor, shots)
+	jobName, err := googleCreateJob(token, cfg.Project, programName, cfg.Processor, shots, cfg.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("google: create job: %w", err)
 	}
@@ -96,10 +95,17 @@ type serviceAccountKey struct {
 	TokenURI    string `json:"token_uri"`
 }
 
-func googleAccessToken(keyFile string) (token, email string, err error) {
-	data, err := os.ReadFile(keyFile)
-	if err != nil {
-		return "", "", fmt.Errorf("read key file %s: %w", keyFile, err)
+// googleAccessToken accepts either a path to a service account JSON file
+// (the CLI's normal usage) or the raw JSON key content itself — a hosted
+// caller storing per-org credentials in a database has no per-org local
+// file to point at, so it passes the key content directly instead.
+func googleAccessToken(keyFileOrJSON string) (token, email string, err error) {
+	data := []byte(keyFileOrJSON)
+	if !strings.HasPrefix(strings.TrimSpace(keyFileOrJSON), "{") {
+		data, err = os.ReadFile(keyFileOrJSON)
+		if err != nil {
+			return "", "", fmt.Errorf("read key file %s: %w", keyFileOrJSON, err)
+		}
 	}
 
 	var sa serviceAccountKey
@@ -229,11 +235,11 @@ func googleCreateProgram(token, project, qasm3 string) (string, error) {
 	return r.Name, nil
 }
 
-func googleCreateJob(token, project, programName, processor string, shots int) (string, error) {
+func googleCreateJob(token, project, programName, processor string, shots int, extra map[string]string) (string, error) {
 	url := fmt.Sprintf("%s/projects/%s/programs/%s/jobs",
 		googleQuantumBase, project, lastSegment(programName))
 
-	body, _ := json.Marshal(map[string]any{
+	job := map[string]any{
 		"processorName": fmt.Sprintf("projects/%s/processors/%s", project, processor),
 		"runContext": map[string]any{
 			"@type": "type.googleapis.com/cirq.google.api.v2.RunContext",
@@ -246,7 +252,9 @@ func googleCreateJob(token, project, programName, processor string, shots int) (
 				},
 			},
 		},
-	})
+	}
+	mergeExtra(job, extra)
+	body, _ := json.Marshal(job)
 
 	resp, err := googleDo("POST", url, token, body)
 	if err != nil {

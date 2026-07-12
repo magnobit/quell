@@ -1,5 +1,4 @@
-// Copyright 2026 Magnobit. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Magnobit, Inc. All rights reserved.
 
 package backends
 
@@ -24,12 +23,21 @@ import (
 // RunBraket submits a circuit to AWS Braket and returns measurement counts.
 // AWS credentials are read from cfg or from the standard AWS env vars.
 func RunBraket(cfg *config.AWSConfig, qasm3 string) (*RunResult, error) {
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	sessionToken := os.Getenv("AWS_SESSION_TOKEN")
+	accessKey := cfg.AccessKeyID
+	if accessKey == "" {
+		accessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	}
+	secretKey := cfg.SecretAccessKey
+	if secretKey == "" {
+		secretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	}
+	sessionToken := cfg.SessionToken
+	if sessionToken == "" {
+		sessionToken = os.Getenv("AWS_SESSION_TOKEN")
+	}
 
 	if accessKey == "" || secretKey == "" {
-		return nil, fmt.Errorf("braket: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars are required")
+		return nil, fmt.Errorf("braket: access_key_id/secret_access_key are required (aws.access_key_id/aws.secret_access_key in quell.config.yml, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY env vars)")
 	}
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
@@ -99,6 +107,7 @@ func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int
 		"outputS3KeyPrefix": cfg.S3Prefix,
 		"action":            string(actionJSON),
 	}
+	mergeExtra(payload, cfg.Extra)
 	body, _ := json.Marshal(payload)
 
 	resp, err := awsDo("POST", endpoint+"/quantum-task", cfg.Region, "braket", creds, body)

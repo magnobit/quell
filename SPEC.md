@@ -1,6 +1,6 @@
 # Quell Language Specification
 
-Version: 0.2.0
+Version: 0.3.0
 
 ---
 
@@ -250,12 +250,54 @@ print(result.measurement_counts)
 
 ---
 
+## Optimizer
+
+Compilation lowers the parsed `Circuit` AST into a backend-independent
+intermediate representation — `ir.Program`, a flat list of `ir.Op` — before
+any code generation happens. Every compile target (OpenQASM 3, Qiskit, Cirq,
+Braket) generates its output from this IR, not from the parser AST directly.
+
+By default, the IR is run through a conservative optimizer before codegen.
+The optimizer never changes circuit semantics: every pass is purely a
+correctness-preserving simplification, and none of them ever reorder or
+cancel operations across a `MEASURE`, `BARRIER`, or `RESET` that touches any
+of the qubits involved — those instructions are hard synchronisation points.
+
+Three passes run in order:
+
+1. **Zero-angle rotation elimination** — drops `RX`/`RY`/`RZ`/`P`/`CRX`/`CRY`/`CRZ`
+   ops whose angle is a multiple of 2π (a no-op), within floating-point
+   tolerance.
+2. **Adjacent self-inverse cancellation** — drops back-to-back pairs of gates
+   that undo each other on the exact same qubit(s) with nothing else
+   touching those qubits in between: `X X`, `Y Y`, `Z Z`, `H H`, `S`+`SDG`,
+   `T`+`TDG`, `CNOT a b`+`CNOT a b`, `CZ a b`+`CZ a b`, `SWAP a b`+`SWAP a b`,
+   and `CCX`/`CSWAP` pairs on identical qubits. Cancellation cascades (`X X
+   X X` fully cancels). `ISWAP` is deliberately never cancelled — applying it
+   twice is not the identity, so an `ISWAP`/`ISWAP` pair is left alone.
+3. **Rotation fusion** — merges consecutive `RX`/`RY`/`RZ`/`P` ops of the
+   *same* kind on the *same* single qubit, with nothing else touching that
+   qubit in between, into one op whose angle is the sum. The zero-angle
+   check re-runs afterward, so a fused pair that sums to a multiple of 2π
+   (e.g. `RZ(1.5)` then `RZ(-1.5)`) is then dropped too.
+
+Disable the optimizer with `--no-optimize` on `quell compile`, or pass
+`optimize=false` to `compile.CompileWithWarnings` when using Quell as a Go
+library. When enabled, any changes the optimizer makes are reported as
+human-readable notes (e.g. `removed 2 redundant gate(s) on qubit 0`),
+printed by the CLI as `Optimizer: <note>` lines and returned from the Go
+library as `CompileResult.OptimizerNotes`.
+
+---
+
 ## CLI reference
 
 ```
 quell run <file>                  Run circuit on configured backend
+  backend: local | ibm | aws | google | ionq | rigetti | azure | dwave
 quell compile <file>              Compile to target language
   --target openqasm|qiskit|cirq|braket
+  --optimize | --no-optimize       Enable/disable the IR optimizer (default: enabled)
   --config path/to/quell.config.yml
   --output out.py
 quell serve                       Start HTTP compile server (PORT env var, default 8081)
@@ -273,7 +315,7 @@ quell help                        Print help
 `quell.config.yml` in the working directory (or path passed with `--config`):
 
 ```yaml
-backend: local  # local | ibm | aws | google
+backend: local  # local | ibm | aws | google | ionq | rigetti | azure | dwave
 
 local:
   shots: 1024
@@ -295,9 +337,47 @@ google:
   project: my-gcp-project
   processor: rainbow
   shots: 1000
+
+ionq:
+  api_key: ${IONQ_API_KEY}
+  device: simulator          # or a QPU name, e.g. qpu.harmony
+  shots: 1024
+
+rigetti:
+  api_key: ${RIGETTI_API_KEY}
+  device: Aspen-M-3
+  shots: 1024
+
+azure:
+  tenant_id: ${AZURE_TENANT_ID}
+  client_id: ${AZURE_CLIENT_ID}
+  client_secret: ${AZURE_CLIENT_SECRET}
+  subscription_id: ${AZURE_SUBSCRIPTION_ID}
+  resource_group: my-resource-group
+  workspace: my-quantum-workspace
+  target: ionq.simulator
+  shots: 500
+
+dwave:
+  api_token: ${DWAVE_API_TOKEN}
+  solver: Advantage_system6.4
+  shots: 100
 ```
 
 `${VAR_NAME}` is replaced at runtime from environment variables. Quell never stores or transmits credentials.
+
+**IonQ, Rigetti, and Azure Quantum** all follow the same OpenQASM 3 submit →
+poll → results shape as IBM/AWS/Google — Quell compiles the circuit once and
+submits it to whichever backend is configured.
+
+**D-Wave is not supported.** D-Wave builds quantum annealers, which solve
+QUBO/Ising optimization problems by relaxing a system into its ground
+state — they have no gate-model execution path at all. A compiled `.quell`
+gate circuit cannot run on a D-Wave solver as-is, so `backend: dwave`
+always returns an error explaining this rather than silently submitting
+something meaningless. Supporting D-Wave properly would require a separate
+QUBO/Ising program representation (and Quell syntax to author them), which
+is a larger, separate effort from the gate-model compiler documented here.
 
 ---
 
@@ -422,6 +502,8 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 - [x] U gate (general single-qubit unitary) — v0.2.0
 - [x] Semantic warnings (no MEASURE, depth, no-op gates) — v0.2.0
 - [x] Panic-safe HTTP compile server with error types — v0.2.0
+- [x] Backend-independent IR (`internal/ir`) and conservative optimizer (`internal/optimizer`) — v0.3.0
+- [x] IonQ, Rigetti, and Azure Quantum backend adapters — v0.3.0
 - [ ] Classical registers and conditional gates (`IF c[0]==1 X 1`)
 - [ ] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`)
 - [ ] Parameterized circuits

@@ -1,5 +1,4 @@
-// Copyright 2026 Magnobit. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Magnobit, Inc. All rights reserved.
 
 package parser
 

@@ -1,8 +1,9 @@
 # Quell
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
 [![Made by Magnobit](https://img.shields.io/badge/Made%20by-Magnobit-6C3BD1.svg)](https://magnobit.com)
+
+**Private.** This repo is Magnobit's proprietary quantum compiler/runtime — see [LICENSE](LICENSE). It's the engine behind Qubit Cloud, QubitLabs, and the public, Apache-2.0-licensed [quell-cli](https://github.com/magnobit/quell-cli), which depends on this module but doesn't contain its source. Don't add public-facing framing (open-source badges, public install instructions, external contributor workflow) back into this README — that belongs in quell-cli, not here.
 
 **The simplest quantum programming language. Write once, run on any platform.**
 
@@ -29,18 +30,17 @@ That's a Bell pair. Three lines. Runs on IBM Quantum, AWS Braket, or Google Quan
 | **Browser native** | ✅ QubitLabs | ✗ | ✗ | ✗ | ✗ |
 | **AI assistant** | ✅ Built-in | ✗ | ✗ | ✗ | ✗ |
 | **Named qubits** | ✅ `qubit alice, bob` | ✗ | ✗ | ✗ | ✗ |
-| **Open source** | ✅ Apache 2.0 | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
 ## Quick start
 
-```bash
-# Install (requires Go 1.25+)
-go install github.com/magnobit/quell/cmd/quell@latest
+Internal/dev use only — this repo is private, so `go install` and Docker pulls only work for people with access to it. The public artifact is [quell-cli](https://github.com/magnobit/quell-cli); its binaries are what external users actually download.
 
-# Or use Docker (no Go needed)
-docker pull ghcr.io/magnobit/quell:latest
+```bash
+# Build from source (requires Go 1.25+, repo access)
+git clone https://github.com/magnobit/quell
+cd quell && go build ./cmd/quell
 
 # Run locally (shows OpenQASM preview)
 quell run examples/bell.quell
@@ -50,6 +50,9 @@ quell compile --target qiskit   examples/bell.quell
 quell compile --target openqasm examples/bell.quell
 quell compile --target cirq     examples/bell.quell
 quell compile --target braket   examples/bell.quell
+
+# Disable the IR optimizer (on by default) to see the raw, unoptimized output
+quell compile --target qiskit --no-optimize examples/bell.quell
 
 # Run on IBM Quantum (after configuring quell.config.yml)
 quell run examples/bell.quell   # backend: ibm in config → submits to IBM
@@ -65,14 +68,11 @@ quell convert my_qiskit_circuit.py
 
 ## Docker
 
+No public image — this repo is private. Build locally:
 ```bash
-# Run a circuit with Docker (mount your working directory)
-docker run --rm -v $(pwd):/workspace ghcr.io/magnobit/quell:latest \
-  run /workspace/examples/bell.quell
-
-# Compile to Qiskit
-docker run --rm -v $(pwd):/workspace ghcr.io/magnobit/quell:latest \
-  compile --target qiskit /workspace/examples/bell.quell
+docker build -t quell .
+docker run --rm -v $(pwd):/workspace quell run /workspace/examples/bell.quell
+docker run --rm -v $(pwd):/workspace quell compile --target qiskit /workspace/examples/bell.quell
 
 # With a config file for hardware backends
 docker run --rm \
@@ -80,14 +80,7 @@ docker run --rm \
   -e IBM_QUANTUM_TOKEN=$IBM_QUANTUM_TOKEN \
   -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
   -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-  ghcr.io/magnobit/quell:latest \
-  run /workspace/examples/bell.quell
-```
-
-Build locally:
-```bash
-docker build -t quell .
-docker run --rm -v $(pwd):/workspace quell run /workspace/examples/bell.quell
+  quell run /workspace/examples/bell.quell
 ```
 
 ---
@@ -161,6 +154,55 @@ google:
 ```
 
 `key_file` is the path to a Google Cloud service account JSON key file with Quantum Engine access. Quell handles JWT creation and OAuth2 token exchange internally.
+
+### IonQ Cloud
+
+```yaml
+backend: ionq
+ionq:
+  api_key: ${IONQ_API_KEY}
+  device: simulator     # or a QPU name, e.g. qpu.harmony
+  shots: 1024
+```
+
+Quell submits the circuit as OpenQASM 3 to IonQ Cloud's REST job API and polls until complete, same submit → poll → results shape as the other backends.
+
+### Rigetti QCS
+
+```yaml
+backend: rigetti
+rigetti:
+  api_key: ${RIGETTI_API_KEY}
+  device: Aspen-M-3
+  shots: 1024
+```
+
+Rigetti's production stack is normally accessed via pyQuil/gRPC (Quil-T), not a plain REST job API. This adapter targets Rigetti's public REST job-submission surface, modeled with the same submit → poll → results shape as every other Quell backend.
+
+### Azure Quantum
+
+```yaml
+backend: azure
+azure:
+  tenant_id: ${AZURE_TENANT_ID}
+  client_id: ${AZURE_CLIENT_ID}
+  client_secret: ${AZURE_CLIENT_SECRET}
+  subscription_id: ${AZURE_SUBSCRIPTION_ID}
+  resource_group: my-resource-group
+  workspace: my-quantum-workspace
+  target: ionq.simulator
+  shots: 500
+```
+
+Auth uses the Azure AD OAuth2 client-credentials flow (service principal). Quell exchanges your credentials for a bearer token, then submits, polls, and fetches results from the configured workspace/target.
+
+### D-Wave — not supported
+
+```yaml
+backend: dwave
+```
+
+D-Wave builds quantum annealers (QUBO/Ising optimization), not gate-model devices. A compiled `.quell` gate circuit has no meaningful way to run on one, so `backend: dwave` always returns a clear error instead of pretending to submit something. Proper D-Wave support would need a separate QUBO/Ising program representation.
 
 ### Local (default)
 
@@ -247,16 +289,25 @@ quell compile --target openqasm --output bell.qasm        examples/bell.quell
 ```go
 import "github.com/magnobit/quell/compile"
 
-// Compile Quell source to any target
+// Compile Quell source to any target (optimizer enabled by default)
 result, err := compile.Compile(`
   qubit alice, bob
   H alice
   CNOT alice bob
   MEASURE
 `, compile.Qiskit)
+
+// Or get warnings and optimizer notes alongside the compiled code, and
+// control whether the IR optimizer runs:
+r, err := compile.CompileWithWarnings(src, compile.Qiskit, true /* optimize */)
+r.Code           // compiled source
+r.Warnings       // non-fatal semantic warnings (e.g. missing MEASURE)
+r.OptimizerNotes // e.g. "removed 2 redundant gate(s) on qubit 0"
 ```
 
 Available targets: `compile.Qiskit`, `compile.OpenQASM`, `compile.Cirq`, `compile.Braket`
+
+For real hardware execution (what quell-cli and Qubit Cloud's hosted API both use), see `github.com/magnobit/quell/execute` — it re-exports the per-backend credential types and `RunIBM`/`RunAWS`/`RunGoogle`/`RunRigetti`/`RunIonQ`/`RunAzure`/`RunDWave`, plus `Config`/`Load`/`Default` for `quell.config.yml`-based callers, so nothing outside this module needs to touch `internal/backends` or `internal/config` directly.
 
 ---
 
@@ -264,12 +315,15 @@ Available targets: `compile.Qiskit`, `compile.OpenQASM`, `compile.Cirq`, `compil
 
 ```
 quell/
-├── cmd/quell/            — CLI entry point
+├── cmd/quell/            — Internal/dev CLI entry point (the public artifact is the quell-cli repo, not this)
 ├── compile/              — Public Go API (github.com/magnobit/quell/compile)
+├── execute/              — Public Go API for real hardware execution (github.com/magnobit/quell/execute) — what quell-cli and Qubit Cloud's hosted API both import, since Go's internal/ visibility rules block them from reaching internal/backends or internal/config directly
 ├── internal/
-│   ├── parser/           — Quell source → circuit IR (named qubit support)
+│   ├── parser/           — Quell source → circuit AST (named qubit support)
+│   ├── ir/               — Backend-independent IR (parser AST → ir.Program)
+│   ├── optimizer/        — Conservative IR optimizer passes
 │   ├── compiler/         — IR → OpenQASM 3 / Qiskit / Cirq / Braket
-│   ├── backends/         — Hardware runners: IBM, AWS Braket, Google Quantum
+│   ├── backends/         — Hardware runners: IBM, AWS Braket, Google, IonQ, Rigetti, Azure Quantum
 │   └── config/           — quell.config.yml reader + ${ENV_VAR} expansion
 ├── examples/
 │   ├── bell.quell        — Bell pair
@@ -277,12 +331,10 @@ quell/
 │   ├── grover.quell      — Grover's search (target |11⟩)
 │   ├── teleport.quell    — Quantum teleportation
 │   └── named_qubits.quell — Named qubit demo
-├── Dockerfile            — Multi-stage build (scratch-based static binary)
+├── Dockerfile            — Multi-stage build (scratch-based static binary), internal use only
 ├── SPEC.md               — Full language specification
-├── TRADEMARK.md          — Trademark usage policy
-├── CONTRIBUTING.md       — How to contribute
 ├── SECURITY.md           — Vulnerability reporting
-└── NOTICE                — Attribution requirements
+└── LICENSE               — Proprietary — see LICENSE
 ```
 
 ---
@@ -320,23 +372,17 @@ circuit = Circuit().h(0).cnot(0, 1)
 
 ---
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Quick checklist:
+## Internal development checklist
 
 - Every new gate must be implemented in all four compile targets
 - Run `go test ./...` before submitting
-- Add `// Copyright 2026 Magnobit. All rights reserved.` to new files
+- Add `// Copyright 2026 Magnobit, Inc. All rights reserved.` to new files
 - New backends go in `internal/backends/`
 
 ---
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE)
+Proprietary — see [LICENSE](LICENSE). Copyright 2026 [Magnobit, Inc.](https://magnobit.com) All rights reserved.
 
-Copyright 2026 [Magnobit](https://magnobit.com)
-
-> **Trademark notice:** "Quell" and the Quell hexagon logo are trademarks of Magnobit, Inc.
-> The Apache 2.0 license covers the source code; the trademarks are not included.
-> See [TRADEMARK.md](TRADEMARK.md) for usage guidelines.
+The public, Apache-2.0-licensed artifact is [quell-cli](https://github.com/magnobit/quell-cli) — it depends on this module but doesn't contain this source.

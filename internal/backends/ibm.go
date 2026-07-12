@@ -1,8 +1,10 @@
-// Copyright 2026 Magnobit. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Magnobit, Inc. All rights reserved.
 
-// Package backends implements hardware submission for IBM Quantum, AWS Braket,
-// and Google Quantum Engine.
+// Package backends implements hardware submission for IBM Quantum, AWS
+// Braket, Google Quantum Engine, IonQ Cloud, Rigetti QCS, and Azure Quantum.
+// RunDWave is also implemented here for interface completeness, but it
+// always returns an error: D-Wave's annealers have no gate-model execution
+// path (see dwave.go).
 package backends
 
 import (
@@ -40,7 +42,7 @@ func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, err
 		shots = 1024
 	}
 
-	jobID, err := ibmSubmit(cfg.Token, cfg.Device, cfg.Instance, qasm3, shots)
+	jobID, err := ibmSubmit(cfg.Token, cfg.Device, cfg.Instance, qasm3, shots, cfg.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("ibm: submit: %w", err)
 	}
@@ -63,15 +65,18 @@ func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, err
 	}, nil
 }
 
-func ibmSubmit(token, backend, instance, qasm3 string, shots int) (string, error) {
+func ibmSubmit(token, backend, instance, qasm3 string, shots int, extra map[string]string) (string, error) {
+	params := map[string]any{
+		"pubs":    []any{[]any{qasm3, nil, shots}},
+		"version": 2,
+	}
+	mergeExtra(params, extra)
+
 	body, _ := json.Marshal(map[string]any{
 		"program_id": "sampler",
 		"backend":    backend,
 		"instance":   instance,
-		"params": map[string]any{
-			"pubs":    []any{[]any{qasm3, nil, shots}},
-			"version": 2,
-		},
+		"params":     params,
 	})
 
 	resp, err := ibmDo("POST", ibmBase+"/runtime/jobs", token, body)

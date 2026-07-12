@@ -1,5 +1,4 @@
-// Copyright 2026 Magnobit. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Magnobit, Inc. All rights reserved.
 
 package main
 
@@ -13,25 +12,35 @@ import (
 
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/parser"
+	"github.com/spf13/cobra"
 )
 
 const maxRequestBytes = 1 << 20 // 1 MB
 
-func cmdServe() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		args := os.Args[2:]
-		for i := 0; i < len(args)-1; i++ {
-			if args[i] == "--port" {
-				port = args[i+1]
-				break
+func newServeCmd() *cobra.Command {
+	var port string
+
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the HTTP compile server",
+		Example: `  quell serve
+  quell serve --port 9000`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !cmd.Flags().Changed("port") {
+				if p := os.Getenv("PORT"); p != "" {
+					port = p
+				}
 			}
-		}
-	}
-	if port == "" {
-		port = "8081"
+			return serve(port)
+		},
 	}
 
+	cmd.Flags().StringVar(&port, "port", "8081", "port to listen on (env PORT)")
+	return cmd
+}
+
+func serve(port string) error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -68,8 +77,9 @@ func cmdServe() {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 
 		var req struct {
-			Code   string `json:"code"`
-			Target string `json:"target"`
+			Code     string `json:"code"`
+			Target   string `json:"target"`
+			Optimize *bool  `json:"optimize"` // defaults to true when omitted
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			status := http.StatusBadRequest
@@ -103,7 +113,12 @@ func cmdServe() {
 			return
 		}
 
-		result, err := compiler.Compile(circ, target)
+		optimize := true
+		if req.Optimize != nil {
+			optimize = *req.Optimize
+		}
+
+		result, notes, err := compiler.Compile(circ, target, optimize)
 		if err != nil {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -118,15 +133,14 @@ func cmdServe() {
 			lang = "openqasm"
 		}
 
-		json.NewEncoder(w).Encode(map[string]string{
-			"result":   result,
-			"target":   string(target),
-			"language": lang,
+		json.NewEncoder(w).Encode(map[string]any{
+			"result":         result,
+			"target":         string(target),
+			"language":       lang,
+			"optimizerNotes": notes,
 		})
 	})
 
 	fmt.Printf("Quell compile server v%s listening on :%s\n", version, port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		fatalf("server: %v", err)
-	}
+	return http.ListenAndServe(":"+port, mux)
 }
