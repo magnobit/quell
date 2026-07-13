@@ -57,6 +57,17 @@ quell compile --target qiskit --no-optimize examples/bell.quell
 # Run on IBM Quantum (after configuring quell.config.yml)
 quell run examples/bell.quell   # backend: ibm in config → submits to IBM
 
+# Format a .quell file (canonical style: uppercase gate names, aligned comments)
+quell fmt --write examples/bell.quell
+quell fmt --check examples/bell.quell   # for CI: exits 1 if not already formatted
+
+# Language server for editor integration (diagnostics + format-on-save)
+quell lsp
+
+# Package manager — packages are git repos, no hosted registry
+quell pkg add github.com/someuser/quell-gates
+quell pkg list
+
 # AI assistant (requires ANTHROPIC_API_KEY)
 quell ask "how does Grover's algorithm work?"
 
@@ -318,8 +329,11 @@ quell/
 ├── cmd/quell/            — Internal/dev CLI entry point (the public artifact is the quell-cli repo, not this)
 ├── compile/              — Public Go API (github.com/magnobit/quell/compile)
 ├── execute/              — Public Go API for real hardware execution (github.com/magnobit/quell/execute) — what quell-cli and Qubit Cloud's hosted API both import, since Go's internal/ visibility rules block them from reaching internal/backends or internal/config directly
+├── format/               — Public Go API for the canonical formatter (github.com/magnobit/quell/format) — quell fmt
+├── lsp/                  — Public Go API for the language server (github.com/magnobit/quell/lsp) — quell lsp, JSON-RPC/stdio
+├── pkgmgr/               — Public Go API for the package manager (github.com/magnobit/quell/pkgmgr) — quell pkg, git-based fetch into .quell/pkg/
 ├── internal/
-│   ├── parser/           — Quell source → circuit AST (named qubit support)
+│   ├── parser/           — Quell source → circuit AST (named qubit support, file imports — see imports.go)
 │   ├── ir/               — Backend-independent IR (parser AST → ir.Program)
 │   ├── optimizer/        — Conservative IR optimizer passes
 │   ├── compiler/         — IR → OpenQASM 3 / Qiskit / Cirq / Braket

@@ -26,6 +26,9 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(newRunCmd())
 	root.AddCommand(newCompileCmd())
+	root.AddCommand(newFmtCmd())
+	root.AddCommand(newLSPCmd())
+	root.AddCommand(newPkgCmd())
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newAskCmd())
 	root.AddCommand(newConvertCmd())

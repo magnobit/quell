@@ -120,6 +120,10 @@ func Parse(src string) (*Circuit, error) {
 			continue
 		}
 
+		if keyword == "IMPORT" {
+			return nil, fmt.Errorf("line %d: import requires a file on disk to resolve paths against — use parser.ParseFile (or the CLI, which always does) instead of Parse on a bare source string", lineNum)
+		}
+
 		gate := keyword
 		spec, known := gateArity[gate]
 		if !known {

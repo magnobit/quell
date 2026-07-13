@@ -61,11 +61,41 @@ func Compile(src string, target Target) (string, error) {
 // Warnings and notes are never empty strings; callers should surface them to
 // users. Set optimize to false to skip the IR optimizer passes and get a
 // direct, unoptimized translation of the parsed circuit.
+//
+// src must not contain "import" lines — those need a file on disk to
+// resolve paths against, so use CompileFile/CompileFileWithWarnings instead.
 func CompileWithWarnings(src string, target Target, optimize bool) (CompileResult, error) {
 	c, err := parser.Parse(src)
 	if err != nil {
 		return CompileResult{}, err
 	}
+	return compileCircuit(c, target, optimize)
+}
+
+// CompileFile parses the .quell file at path — resolving any "import"
+// lines relative to its directory, or against an installed package under
+// the project's quell.pkg.yml (see parser.ParseFile) — and compiles it to
+// target, with the IR optimizer enabled by default.
+func CompileFile(path string, target Target) (string, error) {
+	r, err := CompileFileWithWarnings(path, target, true)
+	if err != nil {
+		return "", err
+	}
+	return r.Code, nil
+}
+
+// CompileFileWithWarnings is CompileWithWarnings for a file on disk,
+// supporting "import" lines. See parser.ParseFile for import resolution
+// rules (relative paths vs. package paths, cycle detection).
+func CompileFileWithWarnings(path string, target Target, optimize bool) (CompileResult, error) {
+	c, err := parser.ParseFile(path)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	return compileCircuit(c, target, optimize)
+}
+
+func compileCircuit(c *parser.Circuit, target Target, optimize bool) (CompileResult, error) {
 	code, notes, err := compiler.Compile(c, target, optimize)
 	if err != nil {
 		return CompileResult{}, err

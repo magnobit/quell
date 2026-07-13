@@ -36,8 +36,12 @@ for the full flag list.`,
   quell run bell.quell --backend ionq --ionq-api-key $KEY --set ionq.error_mitigation=true`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src := readFile(args[0])
-			circ, err := parser.Parse(src)
+			if !strings.HasSuffix(args[0], ".quell") {
+				return fmt.Errorf("expected a .quell file, got: %s", args[0])
+			}
+			// ParseFile (not Parse) so "import" lines resolve relative to
+			// this file's directory, or against an installed package.
+			circ, err := parser.ParseFile(args[0])
 			if err != nil {
 				return fmt.Errorf("parse error: %w", err)
 			}

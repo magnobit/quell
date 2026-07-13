@@ -97,6 +97,21 @@ Rules:
 - Mixing named and indexed qubits is supported; indices continue after the last declared name
 - Multiple names on one line (comma-separated) or across multiple `qubit` lines
 
+### File imports
+
+```quell
+import "./lib/bell_pair.quell"
+MEASURE
+```
+
+`import "path"` splices another file's source in at that point — this is preprocessor-`#include` semantics, **not** a module/namespace system: there is no scoping, and an imported file's named qubits share the importing file's qubit namespace (as if its text had been pasted in directly). This is deliberately simpler than the "subroutines and gate definitions" roadmap item below, which is a real callable/parameterized unit — imports are just reusable circuit fragments, not functions.
+
+Rules:
+- A path starting with `.` (`./` or `../`) is a plain relative filesystem path, resolved against the importing file's own directory.
+- Any other path (e.g. `github.com/someuser/quell-gates/qft.quell`) is a **package** import, resolved against `.quell/pkg/<path>` under the project root (the nearest ancestor directory containing `quell.pkg.yml`) — see [Package manager](#package-manager) below. Resolving one with no `quell.pkg.yml` anywhere in the tree is an error, not a silent no-op.
+- Import cycles (a file importing itself, directly or transitively) are an error. A **diamond** import — the same file reachable via two different, non-cyclic paths — is not a cycle, and is spliced in at each place it's referenced (no deduplication).
+- `import` requires a file on disk to resolve paths against: it only works via `quell run`/`quell compile` (or `parser.ParseFile`/`compile.CompileFile` if you're using Quell as a Go library) — not the string-only `Parse`/`Compile` APIs, and not (yet) `quell fmt`/`quell lsp`, which still operate on a single file's own text.
+
 ### Whitespace
 
 Leading/trailing whitespace is ignored. Blank lines are ignored. Multiple spaces between tokens are treated as one.
@@ -300,6 +315,12 @@ quell compile <file>              Compile to target language
   --optimize | --no-optimize       Enable/disable the IR optimizer (default: enabled)
   --config path/to/quell.config.yml
   --output out.py
+quell fmt <file>                  Format a Quell source file
+  --write | --check                Reformat in place | exit 1 if not already formatted
+quell lsp                         Start the language server (LSP over stdio)
+quell pkg add <source> [version]  Add a package to quell.pkg.yml and fetch it
+quell pkg get                     Fetch every package in quell.pkg.yml
+quell pkg list                    List installed packages
 quell serve                       Start HTTP compile server (PORT env var, default 8081)
   --port <port>
 quell ask "<question>"            AI assistant (requires ANTHROPIC_API_KEY)
@@ -307,6 +328,26 @@ quell convert <file>              Convert Python/Qiskit to Quell
 quell version                     Print version
 quell help                        Print help
 ```
+
+---
+
+## Package manager
+
+`quell.pkg.yml` at a project's root lists git-hosted dependencies — there's no hosted registry; a "package" is just a git repo:
+
+```yaml
+require:
+  - source: github.com/someuser/quell-gates
+    version: v1.2.0   # a branch, tag, or commit; omit for the default branch
+```
+
+```sh
+quell pkg add github.com/someuser/quell-gates v1.2.0   # adds to the manifest, then fetches
+quell pkg get                                           # fetches everything already in the manifest
+quell pkg list                                          # what's actually installed on disk
+```
+
+`quell pkg get`/`add` shell out to the real `git` binary (clone on first fetch, fetch + checkout to update), into `.quell/pkg/<source>/` under the project root — which is exactly where an `import "<source>/<file>.quell"` statement resolves against (see [File imports](#file-imports)). `<source>` is never an npm/PyPI-style short name — it's the literal git host+path, so `import`, `quell pkg add`, and the on-disk cache directory all use the same string.
 
 ---
 
@@ -504,6 +545,7 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 - [x] Panic-safe HTTP compile server with error types — v0.2.0
 - [x] Backend-independent IR (`internal/ir`) and conservative optimizer (`internal/optimizer`) — v0.3.0
 - [x] IonQ, Rigetti, and Azure Quantum backend adapters — v0.3.0
+- [x] File imports (`import "./path.quell"`) and a git-based package manager (`quell pkg`) — v0.4.0
 - [ ] Classical registers and conditional gates (`IF c[0]==1 X 1`)
 - [ ] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`)
 - [ ] Parameterized circuits

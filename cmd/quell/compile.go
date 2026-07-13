@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/parser"
@@ -23,8 +24,12 @@ func newCompileCmd() *cobra.Command {
   quell compile --target cirq --no-optimize -o out.py bell.quell`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src := readFile(args[0])
-			circ, err := parser.Parse(src)
+			if !strings.HasSuffix(args[0], ".quell") {
+				return fmt.Errorf("expected a .quell file, got: %s", args[0])
+			}
+			// ParseFile (not Parse) so "import" lines resolve relative to
+			// this file's directory, or against an installed package.
+			circ, err := parser.ParseFile(args[0])
 			if err != nil {
 				return fmt.Errorf("parse error: %w", err)
 			}
