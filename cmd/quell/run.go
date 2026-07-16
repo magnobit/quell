@@ -10,7 +10,9 @@ import (
 	"github.com/magnobit/quell/internal/backends"
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/config"
+	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
+	"github.com/magnobit/quell/simulate"
 	"github.com/spf13/cobra"
 )
 
@@ -209,14 +211,15 @@ func applySetFlags(cfg *config.Config, sets []string) error {
 func runOnBackend(cfg *config.Config, circ *parser.Circuit) error {
 	switch cfg.Backend {
 	case "local", "":
-		out, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
+		shots := cfg.Local.Shots
+		if shots == 0 {
+			shots = 1000
 		}
-		fmt.Println("--- OpenQASM 3 ---")
-		fmt.Println(out)
-		fmt.Println("Tip: use QubitLabs playground for browser simulation →")
-		fmt.Println("     https://qubitlabs.magnobit.com")
+		result, err := simulate.RunProgram(ir.Lower(circ), shots)
+		if err != nil {
+			return fmt.Errorf("simulate error: %w", err)
+		}
+		result.Print()
 		return nil
 
 	case "ibm":
