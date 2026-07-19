@@ -8,15 +8,12 @@ import (
 	"github.com/magnobit/quell/internal/config"
 )
 
-// RunDWave always returns an error. D-Wave builds quantum annealers, which
-// solve QUBO/Ising optimization problems by relaxing a system into its
-// ground state — they have no gate-model execution path at all, so a
-// compiled OpenQASM 3 gate circuit cannot be submitted to a D-Wave solver.
-// Supporting D-Wave properly would require a separate QUBO/Ising program
-// representation (and a corresponding Quell surface syntax to author them),
-// which is out of scope for the gate-based Quell compiler today. This
-// adapter exists so the config surface (config.DWaveConfig) and CLI backend
-// list are complete, without pretending a working submission is possible.
+// RunDWave always returns an error for gate-model OpenQASM. D-Wave builds
+// quantum annealers (QUBO/Ising). Author annealer problems via package
+// github.com/magnobit/quell/anneal (QUBO text format) — Leap submission is
+// not wired yet. This adapter remains so config/CLI/Cloud lists stay complete.
 func RunDWave(cfg *config.DWaveConfig, qasm3 string) (*RunResult, error) {
-	return nil, fmt.Errorf("dwave: D-Wave is a quantum annealer (QUBO/Ising), not a gate-model device — a compiled .quell gate circuit cannot run on it as-is; annealer support needs a separate QUBO/Ising program representation, not yet implemented")
+	_ = cfg
+	_ = qasm3
+	return nil, fmt.Errorf("dwave: D-Wave is an annealer — gate Quell/.qasm cannot run here; define a QUBO with package quell/anneal (ParseQUBO), then submit via Leap once annealer execution ships")
 }

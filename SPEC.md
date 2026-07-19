@@ -546,6 +546,10 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 - [x] Backend-independent IR (`internal/ir`) and conservative optimizer (`internal/optimizer`) — v0.3.0
 - [x] IonQ, Rigetti, and Azure Quantum backend adapters — v0.3.0
 - [x] File imports (`import "./path.quell"`) and a git-based package manager (`quell pkg`) — v0.4.0
+- [x] QUBO / annealer foundation (`quell/anneal` ParseQUBO) — gate circuits still cannot run on D-Wave
+- [ ] D-Wave Leap submission for QUBO problems
+- [ ] NVIDIA cuQuantum / CUDA-Q GPU simulation adapter (`backend: nvidia` stubbed)
+- [ ] Intel Quantum SDK adapter
 - [ ] Classical registers and conditional gates (`IF c[0]==1 X 1`)
 - [ ] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`)
 - [ ] Parameterized circuits

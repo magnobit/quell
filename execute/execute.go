@@ -25,6 +25,7 @@ const (
 	IonQ    = "ionq"
 	Azure   = "azure"
 	DWave   = "dwave"
+	NVIDIA  = "nvidia"
 )
 
 // Credential/config types, re-exported so callers don't need (and can't
@@ -39,6 +40,7 @@ type (
 	IonQCredentials    = config.IonQConfig
 	AzureCredentials   = config.AzureConfig
 	DWaveCredentials   = config.DWaveConfig
+	NVIDIACredentials  = config.NVIDIAConfig
 )
 
 // Load reads quell.config.yml (or the given path), expanding ${ENV_VAR}
@@ -76,4 +78,8 @@ func RunAzure(cfg *AzureCredentials, qasm3 string) (*Result, error) {
 
 func RunDWave(cfg *DWaveCredentials, qasm3 string) (*Result, error) {
 	return backends.RunDWave(cfg, qasm3)
+}
+
+func RunNVIDIA(cfg *NVIDIACredentials, qasm3 string) (*Result, error) {
+	return backends.RunNVIDIA(cfg, qasm3)
 }

@@ -20,6 +20,7 @@ type Config struct {
 	IonQ    IonQConfig    `yaml:"ionq"`
 	Azure   AzureConfig   `yaml:"azure"`
 	DWave   DWaveConfig   `yaml:"dwave"`
+	NVIDIA  NVIDIAConfig  `yaml:"nvidia"`
 }
 
 type LocalConfig struct {
@@ -101,6 +102,13 @@ type DWaveConfig struct {
 	Extra    map[string]string `yaml:"extra"`
 }
 
+// NVIDIAConfig is reserved for the cuQuantum / CUDA-Q GPU simulation path.
+type NVIDIAConfig struct {
+	Device string            `yaml:"device"` // e.g. cuda:0
+	Shots  int               `yaml:"shots"`
+	Extra  map[string]string `yaml:"extra"`
+}
+
 var envVarRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 
 func Load(path string) (*Config, error) {
@@ -154,10 +162,11 @@ func (c *Config) ExtraFor(backend string) (map[string]string, error) {
 		"ionq":    &c.IonQ.Extra,
 		"azure":   &c.Azure.Extra,
 		"dwave":   &c.DWave.Extra,
+		"nvidia":  &c.NVIDIA.Extra,
 	}
 	p, ok := m[backend]
 	if !ok {
-		return nil, fmt.Errorf("unknown backend %q for --set — valid: ibm, aws, google, rigetti, ionq, azure, dwave", backend)
+		return nil, fmt.Errorf("unknown backend %q for --set — valid: ibm, aws, google, rigetti, ionq, azure, dwave, nvidia", backend)
 	}
 	if p == nil {
 		return nil, fmt.Errorf("backend %q has no request parameters to extend", backend)
