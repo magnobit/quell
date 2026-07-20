@@ -10,6 +10,7 @@
 package execute
 
 import (
+	"github.com/magnobit/quell/anneal"
 	"github.com/magnobit/quell/internal/backends"
 	"github.com/magnobit/quell/internal/config"
 )
@@ -78,6 +79,10 @@ func RunAzure(cfg *AzureCredentials, qasm3 string) (*Result, error) {
 
 func RunDWave(cfg *DWaveCredentials, qasm3 string) (*Result, error) {
 	return backends.RunDWave(cfg, qasm3)
+}
+
+func RunDWaveQUBO(cfg *DWaveCredentials, problem *anneal.Problem) (*Result, error) {
+	return backends.RunDWaveQUBO(cfg, problem)
 }
 
 func RunNVIDIA(cfg *NVIDIACredentials, qasm3 string) (*Result, error) {

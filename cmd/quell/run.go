@@ -58,13 +58,14 @@ for the full flag list.`,
 			fmt.Printf("Qubits  : %d\n", circ.NumQubits)
 			fmt.Printf("Gates   : %d\n\n", len(circ.Instructions))
 
-			return runOnBackend(cfg, circ)
+			srcBytes, _ := os.ReadFile(args[0])
+			return runOnBackend(cfg, circ, string(srcBytes))
 		},
 	}
 
 	f := cmd.Flags()
 	f.StringVar(&configPath, "config", "", "path to quell.config.yml (default: ./quell.config.yml or .yaml)")
-	f.StringVar(&backendOverride, "backend", "", "backend: local|ibm|aws|google|ionq|rigetti|azure|dwave (overrides config file)")
+	f.StringVar(&backendOverride, "backend", "", "backend: local|ibm|aws|google|ionq|rigetti|azure|nvidia (dwave → quell anneal run)")
 	f.StringArrayVar(&setFlags, "set", nil, "generic backend param not covered by a typed flag below: --set <backend>.<key>=<value> (repeatable)")
 
 	f.Int("shots", 0, "shots for the local backend")
@@ -208,7 +209,7 @@ func applySetFlags(cfg *config.Config, sets []string) error {
 	return nil
 }
 
-func runOnBackend(cfg *config.Config, circ *parser.Circuit) error {
+func runOnBackend(cfg *config.Config, circ *parser.Circuit, quellSource string) error {
 	switch cfg.Backend {
 	case "local", "":
 		shots := cfg.Local.Shots
@@ -301,16 +302,26 @@ func runOnBackend(cfg *config.Config, circ *parser.Circuit) error {
 		return nil
 
 	case "dwave":
+		return fmt.Errorf("dwave: use `quell anneal run file.qubo` for QUBO/annealer problems (gate circuits cannot run on D-Wave)")
+
+	case "nvidia":
 		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
 		if err != nil {
 			return fmt.Errorf("compile error: %w", err)
 		}
-		if _, err := backends.RunDWave(&cfg.DWave, qasm3); err != nil {
-			return fmt.Errorf("D-Wave run error: %w", err)
+		if cfg.NVIDIA.Extra == nil {
+			cfg.NVIDIA.Extra = map[string]string{}
 		}
+		cfg.NVIDIA.Extra["quell_source"] = quellSource
+		fmt.Println("  Compiled to OpenQASM 3, running on NVIDIA (CUDA-Q or local fallback)…")
+		result, err := backends.RunNVIDIA(&cfg.NVIDIA, qasm3)
+		if err != nil {
+			return fmt.Errorf("NVIDIA run error: %w", err)
+		}
+		result.Print()
 		return nil
 
 	default:
-		return fmt.Errorf("unknown backend %q — valid options: local, ibm, aws, google, ionq, rigetti, azure, dwave", cfg.Backend)
+		return fmt.Errorf("unknown backend %q — valid options: local, ibm, aws, google, ionq, rigetti, azure, nvidia (dwave → quell anneal run)", cfg.Backend)
 	}
 }

@@ -25,6 +25,7 @@ func newRootCmd() *cobra.Command {
 	root.SetVersionTemplate("quell {{.Version}}\n")
 
 	root.AddCommand(newRunCmd())
+	root.AddCommand(newAnnealCmd())
 	root.AddCommand(newSimulateCmd())
 	root.AddCommand(newCompileCmd())
 	root.AddCommand(newFmtCmd())
