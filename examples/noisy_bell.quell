@@ -1,0 +1,6 @@
+// Depolarizing noise demo — histogram should leak off |00>/|11|.
+NOISE depolarizing 0.08
+
+H 0
+CNOT 0 1
+MEASURE

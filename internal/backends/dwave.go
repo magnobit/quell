@@ -60,18 +60,18 @@ func RunDWaveQUBO(cfg *config.DWaveConfig, problem *anneal.Problem) (*RunResult,
 	}
 
 	backend := "D-Wave / local-SA"
+	engine := "local-sa"
+	fellBack := true
 	if res != nil {
-		if strings.Contains(res.Info, "Leap") && !strings.Contains(res.Info, "unavailable") {
-			backend = "D-Wave / " + res.Info
-		} else {
-			backend = "D-Wave / " + res.Info
+		backend = "D-Wave / " + res.Info
+		if strings.Contains(res.Info, "Leap") && !strings.Contains(strings.ToLower(res.Info), "unavailable") {
+			engine = "leap"
+			fellBack = false
 		}
 	}
 
-	return &RunResult{
-		JobID:   "dwave-" + strconv.Itoa(shots),
-		Backend: backend,
-		Shots:   shots,
-		Counts:  res.CountsMap(),
-	}, nil
+	if fellBack {
+		return NewFallback("dwave", engine, backend, "dwave-"+strconv.Itoa(shots), shots, res.CountsMap()), nil
+	}
+	return NewResult("dwave", engine, backend, "dwave-"+strconv.Itoa(shots), shots, res.CountsMap()), nil
 }

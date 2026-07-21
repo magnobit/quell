@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/magnobit/quell/internal/qasmimport"
 	"github.com/spf13/cobra"
 )
 
@@ -38,16 +40,40 @@ func newAskCmd() *cobra.Command {
 
 func newConvertCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "convert <file.py>",
-		Short:   "Convert Python/Qiskit code to Quell (needs ANTHROPIC_API_KEY)",
-		Example: `  quell convert my_qiskit_circuit.py`,
-		Args:    cobra.ExactArgs(1),
+		Use:   "convert <file.py|file.qasm>",
+		Short: "Convert Python/Qiskit (AI) or OpenQASM 3 (local) to Quell",
+		Long: `Convert circuits into Quell.
+
+  • .qasm / .qasm3 — thin local OpenQASM 3 → Quell import (common gates; no API key)
+  • .py — Claude-assisted Qiskit/Python conversion (needs ANTHROPIC_API_KEY)`,
+		Example: `  quell convert bell.qasm
+  quell convert my_qiskit_circuit.py`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			lower := strings.ToLower(path)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			src := string(data)
+
+			if strings.HasSuffix(lower, ".qasm") || strings.HasSuffix(lower, ".qasm3") {
+				out, err := qasmimport.ToQuell(src)
+				if err != nil {
+					return fmt.Errorf("qasm import: %w", err)
+				}
+				fmt.Print(out)
+				return nil
+			}
+
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
 			if apiKey == "" {
-				return fmt.Errorf("ANTHROPIC_API_KEY not set — run: export ANTHROPIC_API_KEY=your-key")
+				return fmt.Errorf("ANTHROPIC_API_KEY not set — run: export ANTHROPIC_API_KEY=your-key (or pass a .qasm file for local import)")
 			}
-			src := readFile(args[0])
+			if !strings.HasSuffix(lower, ".py") && !strings.HasSuffix(lower, ".quell") {
+				return fmt.Errorf("expected .py, .qasm, or .qasm3 file, got: %s", filepath.Ext(path))
+			}
 			prompt := fmt.Sprintf(`Convert the following Python quantum code to Quell language.
 
 Quell syntax: one gate per line, uppercase gate name, then qubit indices, then args.

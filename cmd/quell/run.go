@@ -5,10 +5,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
-	"github.com/magnobit/quell/internal/backends"
-	"github.com/magnobit/quell/internal/compiler"
+	"github.com/magnobit/quell/adapter"
 	"github.com/magnobit/quell/internal/config"
 	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
@@ -19,6 +19,8 @@ import (
 func newRunCmd() *cobra.Command {
 	var configPath, backendOverride string
 	var setFlags []string
+	var paramFlags []string
+	var noiseFlags []string
 
 	cmd := &cobra.Command{
 		Use:   "run <file.quell>",
@@ -29,20 +31,19 @@ Credentials and per-backend parameters can come from quell.config.yml, from
 environment variables, or straight from the command line — in that order of
 precedence (a flag always wins). A parameter without a dedicated flag yet
 can still be sent via --set <backend>.<key>=<value>; see 'quell run --help'
-for the full flag list.`,
+for the full flag list.
+
+Symbolic angles (PARAM / RX theta 0) bind via --param name=radians.
+Local noise models: --noise depolarizing=0.01 (also NOISE in source).`,
 		Example: `  quell run bell.quell
-  quell run bell.quell --backend ibm --ibm-token $IBM_TOKEN --ibm-device ibm_brisbane
-  quell run bell.quell --backend azure --azure-tenant-id $TID --azure-client-id $CID \
-    --azure-client-secret $SECRET --azure-subscription-id $SUB \
-    --azure-resource-group $RG --azure-workspace $WS --azure-target ionq.simulator
-  quell run bell.quell --backend ionq --ionq-api-key $KEY --set ionq.error_mitigation=true`,
+  quell run param.quell --param theta=1.5708
+  quell run bell.quell --noise depolarizing=0.01 --noise amplitude_damping=0.02
+  quell run bell.quell --backend ibm --ibm-token $IBM_TOKEN --ibm-device ibm_brisbane`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !strings.HasSuffix(args[0], ".quell") {
 				return fmt.Errorf("expected a .quell file, got: %s", args[0])
 			}
-			// ParseFile (not Parse) so "import" lines resolve relative to
-			// this file's directory, or against an installed package.
 			circ, err := parser.ParseFile(args[0])
 			if err != nil {
 				return fmt.Errorf("parse error: %w", err)
@@ -53,13 +54,21 @@ for the full flag list.`,
 			if err := applySetFlags(cfg, setFlags); err != nil {
 				return err
 			}
+			params, err := parseParamFlags(paramFlags)
+			if err != nil {
+				return err
+			}
+			noise, err := mergeNoiseFlags(noiseFlags)
+			if err != nil {
+				return err
+			}
 
 			fmt.Printf("Backend : %s\n", cfg.Backend)
 			fmt.Printf("Qubits  : %d\n", circ.NumQubits)
 			fmt.Printf("Gates   : %d\n\n", len(circ.Instructions))
 
 			srcBytes, _ := os.ReadFile(args[0])
-			return runOnBackend(cfg, circ, string(srcBytes))
+			return runOnBackend(cfg, circ, string(srcBytes), params, noise)
 		},
 	}
 
@@ -67,7 +76,8 @@ for the full flag list.`,
 	f.StringVar(&configPath, "config", "", "path to quell.config.yml (default: ./quell.config.yml or .yaml)")
 	f.StringVar(&backendOverride, "backend", "", "backend: local|ibm|aws|google|ionq|rigetti|azure|nvidia (dwave → quell anneal run)")
 	f.StringArrayVar(&setFlags, "set", nil, "generic backend param not covered by a typed flag below: --set <backend>.<key>=<value> (repeatable)")
-
+	f.StringArrayVar(&paramFlags, "param", nil, "bind symbolic angle: --param theta=1.5708 (repeatable)")
+	f.StringArrayVar(&noiseFlags, "noise", nil, "local noise: depolarizing=0.01 or amplitude_damping=0.05 (repeatable)")
 	f.Int("shots", 0, "shots for the local backend")
 
 	f.String("ibm-token", "", "IBM Quantum API token (env IBM_QUANTUM_TOKEN)")
@@ -209,119 +219,111 @@ func applySetFlags(cfg *config.Config, sets []string) error {
 	return nil
 }
 
-func runOnBackend(cfg *config.Config, circ *parser.Circuit, quellSource string) error {
-	switch cfg.Backend {
-	case "local", "":
-		shots := cfg.Local.Shots
-		if shots == 0 {
-			shots = 1000
-		}
-		result, err := simulate.RunProgram(ir.Lower(circ), shots)
-		if err != nil {
-			return fmt.Errorf("simulate error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "ibm":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		fmt.Println("  Compiled to OpenQASM 3, submitting to IBM Quantum…")
-		result, err := backends.RunIBM(&cfg.IBM, qasm3, circ.NumQubits)
-		if err != nil {
-			return fmt.Errorf("IBM run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "aws":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		fmt.Println("  Compiled to OpenQASM 3, submitting to AWS Braket…")
-		result, err := backends.RunBraket(&cfg.AWS, qasm3)
-		if err != nil {
-			return fmt.Errorf("Braket run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "google":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		fmt.Println("  Compiled to OpenQASM 3, submitting to Google Quantum Engine…")
-		result, err := backends.RunGoogle(&cfg.Google, qasm3)
-		if err != nil {
-			return fmt.Errorf("Google run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "ionq":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		fmt.Println("  Compiled to OpenQASM 3, submitting to IonQ Cloud…")
-		result, err := backends.RunIonQ(&cfg.IonQ, qasm3, circ.NumQubits)
-		if err != nil {
-			return fmt.Errorf("IonQ run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "rigetti":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		fmt.Println("  Compiled to OpenQASM 3, submitting to Rigetti QCS…")
-		result, err := backends.RunRigetti(&cfg.Rigetti, qasm3)
-		if err != nil {
-			return fmt.Errorf("Rigetti run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "azure":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		fmt.Println("  Compiled to OpenQASM 3, submitting to Azure Quantum…")
-		result, err := backends.RunAzure(&cfg.Azure, qasm3)
-		if err != nil {
-			return fmt.Errorf("Azure run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	case "dwave":
+func runOnBackend(cfg *config.Config, circ *parser.Circuit, quellSource string, params map[string]float64, noise simulate.NoiseModel) error {
+	if cfg.Backend == "dwave" {
 		return fmt.Errorf("dwave: use `quell anneal run file.qubo` for QUBO/annealer problems (gate circuits cannot run on D-Wave)")
-
-	case "nvidia":
-		qasm3, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, true)
-		if err != nil {
-			return fmt.Errorf("compile error: %w", err)
-		}
-		if cfg.NVIDIA.Extra == nil {
-			cfg.NVIDIA.Extra = map[string]string{}
-		}
-		cfg.NVIDIA.Extra["quell_source"] = quellSource
-		fmt.Println("  Compiled to OpenQASM 3, running on NVIDIA (CUDA-Q or local fallback)…")
-		result, err := backends.RunNVIDIA(&cfg.NVIDIA, qasm3)
-		if err != nil {
-			return fmt.Errorf("NVIDIA run error: %w", err)
-		}
-		result.Print()
-		return nil
-
-	default:
-		return fmt.Errorf("unknown backend %q — valid options: local, ibm, aws, google, ionq, rigetti, azure, nvidia (dwave → quell anneal run)", cfg.Backend)
 	}
+
+	prog := ir.Lower(circ)
+	if len(params) > 0 || ir.NeedsBind(prog) {
+		bound, err := ir.Bind(prog, params)
+		if err != nil {
+			return err
+		}
+		prog = bound
+	}
+
+	name := cfg.Backend
+	if name == "" {
+		name = "local"
+	}
+
+	var cfgAny any
+	shots := 0
+	switch name {
+	case "local":
+		shots = cfg.Local.Shots
+		cfgAny = nil
+	case "ibm":
+		cfgAny = &cfg.IBM
+	case "aws":
+		cfgAny = &cfg.AWS
+	case "google":
+		cfgAny = &cfg.Google
+	case "ionq":
+		cfgAny = &cfg.IonQ
+	case "rigetti":
+		cfgAny = &cfg.Rigetti
+	case "azure":
+		cfgAny = &cfg.Azure
+	case "nvidia":
+		cfgAny = &cfg.NVIDIA
+	case "intel":
+		cfgAny = &cfg.Intel
+	default:
+		return fmt.Errorf("unknown backend %q — valid: %v (dwave → quell anneal run)", name, adapter.Names())
+	}
+
+	if name != "local" {
+		fmt.Printf("  IR → BackendAdapter %q …\n", name)
+	}
+
+	result, err := adapter.Run(name, &adapter.Job{
+		Program:     prog,
+		Optimize:    true,
+		Shots:       shots,
+		Config:      cfgAny,
+		QuellSource: quellSource,
+		Noise:       noise,
+	})
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	result.Print()
+	return nil
+}
+
+
+func parseParamFlags(flags []string) (map[string]float64, error) {
+	out := map[string]float64{}
+	for _, s := range flags {
+		eq := strings.IndexByte(s, '=')
+		if eq <= 0 {
+			return nil, fmt.Errorf("invalid --param %q — expected name=radians (e.g. --param theta=1.5708)", s)
+		}
+		name := strings.TrimSpace(s[:eq])
+		val := strings.TrimSpace(s[eq+1:])
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			// allow PI/2 style
+			if a, ok := evalAngleLite(val); ok {
+				f = a
+			} else {
+				return nil, fmt.Errorf("invalid --param value %q: %w", val, err)
+			}
+		}
+		out[name] = f
+	}
+	return out, nil
+}
+
+func evalAngleLite(tok string) (float64, bool) {
+	upper := strings.ToUpper(tok)
+	s := strings.ReplaceAll(upper, "PI", fmt.Sprintf("%g", 3.141592653589793))
+	if i := strings.Index(s, "*"); i > 0 {
+		a, e1 := strconv.ParseFloat(s[:i], 64)
+		b, e2 := strconv.ParseFloat(s[i+1:], 64)
+		if e1 == nil && e2 == nil {
+			return a * b, true
+		}
+	}
+	if i := strings.LastIndex(s, "/"); i > 0 {
+		a, e1 := strconv.ParseFloat(s[:i], 64)
+		b, e2 := strconv.ParseFloat(s[i+1:], 64)
+		if e1 == nil && e2 == nil && b != 0 {
+			return a / b, true
+		}
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil
 }

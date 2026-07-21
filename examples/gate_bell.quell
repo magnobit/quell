@@ -1,0 +1,8 @@
+// Gate macro (expanded at parse time)
+gate bell a b {
+  H a
+  CNOT a b
+}
+
+bell 0 1
+MEASURE

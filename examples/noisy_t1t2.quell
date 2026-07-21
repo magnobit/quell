@@ -1,0 +1,8 @@
+// Teaching noise: T1/T2 + readout SPAM
+NOISE amplitude_damping 0.05
+NOISE phase_damping 0.05
+NOISE readout 0.03
+
+H 0
+CNOT 0 1
+MEASURE

@@ -38,19 +38,14 @@ func RunNVIDIA(cfg *config.NVIDIAConfig, qasm3 string) (*RunResult, error) {
 
 	if os.Getenv("QUELL_NVIDIA_REQUIRE_CUDAQ") != "1" {
 		if counts, err := tryCUDAQ(qasm3, shots, device); err == nil {
-			return &RunResult{
-				JobID:   "nvidia-cudaq",
-				Backend: "NVIDIA / CUDA-Q / " + device,
-				Shots:   shots,
-				Counts:  counts,
-			}, nil
+			return NewResult("nvidia", "cudaq", "NVIDIA / CUDA-Q / "+device, "nvidia-cudaq", shots, counts), nil
 		}
 	} else {
 		counts, err := tryCUDAQ(qasm3, shots, device)
 		if err != nil {
 			return nil, err
 		}
-		return &RunResult{JobID: "nvidia-cudaq", Backend: "NVIDIA / CUDA-Q / " + device, Shots: shots, Counts: counts}, nil
+		return NewResult("nvidia", "cudaq", "NVIDIA / CUDA-Q / "+device, "nvidia-cudaq", shots, counts), nil
 	}
 
 	// Local fallback — same simulator as `quell simulate`
@@ -62,12 +57,7 @@ func RunNVIDIA(cfg *config.NVIDIAConfig, qasm3 string) (*RunResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nvidia: local fallback: %w", err)
 	}
-	return &RunResult{
-		JobID:   "nvidia-local-fallback",
-		Backend: "NVIDIA / local-statevector-fallback",
-		Shots:   shots,
-		Counts:  res.Counts,
-	}, nil
+	return NewFallback("nvidia", "local-statevector", "NVIDIA / local-statevector-fallback", "nvidia-local-fallback", shots, res.Counts), nil
 }
 
 func tryCUDAQ(qasm3 string, shots int, device string) (map[string]int, error) {

@@ -6,15 +6,10 @@
 // configured, or --backend local) and `quell simulate` can execute a circuit
 // without any cloud credentials or network access at all.
 //
-// Like the Playground's simulator, this models a single terminal
-// measurement: gate application stops at the first MEASURE instruction (its
-// qubit list, if any, is not consulted — sampled outcomes always cover every
-// qubit in the register), matching the Playground exactly rather than
-// attempting true mid-circuit measurement. RESET is implemented as an ideal
-// projection — exact for a qubit unentangled with the rest of the register
-// (the common case: reusing an ancilla), a documented approximation
-// otherwise, since true decoherence needs a density matrix, not a single
-// state vector.
+// Like the Playground's simulator, the default path models a terminal
+// measurement (gate application stops at the first MEASURE). When the
+// circuit contains IF conditionals or active noise models, RunProgram
+// switches to a per-shot trajectory path.
 package simulate
 
 import (
@@ -244,6 +239,38 @@ func (sv *StateVector) Probs() []float64 {
 	return p
 }
 
+// MeasureBit collapses qubit q onto a sampled 0/1 outcome and returns that bit.
+// Used for mid-circuit MEASURE when IF conditionals follow.
+func (sv *StateVector) MeasureBit(q int, rng *rand.Rand) int {
+	s := 1 << q
+	p1 := 0.0
+	for i, a := range sv.amp {
+		if i&s != 0 {
+			p1 += real(a)*real(a) + imag(a)*imag(a)
+		}
+	}
+	bit := 0
+	if rng.Float64() < p1 {
+		bit = 1
+	}
+	// Project and renormalize
+	norm := 0.0
+	for i := range sv.amp {
+		if ((i>>q)&1) != bit {
+			sv.amp[i] = 0
+		} else {
+			norm += real(sv.amp[i])*real(sv.amp[i]) + imag(sv.amp[i])*imag(sv.amp[i])
+		}
+	}
+	if norm > 0 {
+		scale := 1 / math.Sqrt(norm)
+		for i := range sv.amp {
+			sv.amp[i] *= complex(scale, 0)
+		}
+	}
+	return bit
+}
+
 // Sample draws `shots` measurement outcomes from the current state,
 // returning bit-string → count (e.g. "00" → 512), MSB-first with qubit 0 as
 // the rightmost character — the same convention internal/backends uses for
@@ -273,6 +300,15 @@ type Result struct {
 	Probs     []float64      // probability of each computational basis state, len 2^NumQubits
 }
 
+// Options configures local simulation (shots, optional noise override).
+type Options struct {
+	Shots int
+	// Noise overrides/merges with Program.Noise* when Active.
+	Noise NoiseModel
+	// Seed, when non-zero, seeds the RNG (useful for tests).
+	Seed int64
+}
+
 // Run parses and simulates Quell source, sampling shots measurement
 // outcomes from the final state. shots <= 0 defaults to 1000.
 func Run(src string, shots int) (*Result, error) {
@@ -280,7 +316,7 @@ func Run(src string, shots int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return RunProgram(ir.Lower(c), shots)
+	return RunProgramOpts(ir.Lower(c), Options{Shots: shots})
 }
 
 // RunFile parses and simulates the .quell file at path — resolving any
@@ -293,7 +329,7 @@ func RunFile(path string, shots int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return RunProgram(ir.Lower(c), shots)
+	return RunProgramOpts(ir.Lower(c), Options{Shots: shots})
 }
 
 // RunProgram simulates an already-lowered IR program — the entry point for
@@ -301,8 +337,17 @@ func RunFile(path string, shots int) (*Result, error) {
 // parsed *parser.Circuit and want to reuse the same ir.Lower step the
 // compiler uses, rather than re-parsing from source.
 func RunProgram(p *ir.Program, shots int) (*Result, error) {
+	return RunProgramOpts(p, Options{Shots: shots})
+}
+
+// RunProgramOpts is RunProgram with explicit Options (noise, seed).
+func RunProgramOpts(p *ir.Program, opt Options) (*Result, error) {
+	shots := opt.Shots
 	if shots <= 0 {
 		shots = 1000
+	}
+	if ir.NeedsBind(p) {
+		return nil, fmt.Errorf("simulate: circuit has unbound parameters %v — bind with --param name=value first", ir.UnboundParams(p))
 	}
 	n := p.NumQubits
 	if n < 1 {
@@ -310,6 +355,29 @@ func RunProgram(p *ir.Program, shots int) (*Result, error) {
 	}
 	if n > maxQubits {
 		return nil, fmt.Errorf("simulate: %d qubits exceeds the local simulator's limit of %d (a 2^%d-entry state vector would exhaust memory) — use a real backend instead", n, maxQubits, n)
+	}
+
+	noise := NoiseModel{
+		Depolarizing:     p.NoiseDepolarizing,
+		AmplitudeDamping: p.NoiseAmplitudeDamping,
+		PhaseDamping:     p.NoisePhaseDamping,
+		ReadoutError:     p.NoiseReadout,
+	}
+	noise = MergeNoise(noise, opt.Noise)
+	if err := noise.Validate(); err != nil {
+		return nil, err
+	}
+
+	hasIF := false
+	for _, op := range p.Ops {
+		if op.Kind == ir.OpIF {
+			hasIF = true
+			break
+		}
+	}
+	// Stochastic gate noise / IF require per-shot trajectories.
+	if hasIF || noise.GateNoise() {
+		return runTrajectories(p, shots, n, noise, opt.Seed)
 	}
 
 	sv := New(n)
@@ -322,13 +390,78 @@ func RunProgram(p *ir.Program, shots int) (*Result, error) {
 		}
 	}
 
-	rng := rand.New(rand.NewSource(rand.Int63()))
+	seed := opt.Seed
+	if seed == 0 {
+		seed = rand.Int63()
+	}
+	rng := rand.New(rand.NewSource(seed))
+	counts := sv.Sample(shots, rng)
+	counts = noise.CorruptCounts(counts, rng)
 	return &Result{
 		NumQubits: n,
 		Shots:     shots,
-		Counts:    sv.Sample(shots, rng),
+		Counts:    counts,
 		Probs:     sv.Probs(),
 	}, nil
+}
+
+func runTrajectories(p *ir.Program, shots, n int, noise NoiseModel, seed int64) (*Result, error) {
+	if seed == 0 {
+		seed = rand.Int63()
+	}
+	rng := rand.New(rand.NewSource(seed))
+	counts := make(map[string]int)
+	for s := 0; s < shots; s++ {
+		sv := New(n)
+		creg := make([]int, n)
+		for _, op := range p.Ops {
+			switch op.Kind {
+			case ir.OpMEASURE:
+				qs := op.Qubits
+				if len(qs) == 0 {
+					qs = make([]int, n)
+					for i := range qs {
+						qs[i] = i
+					}
+				}
+				for _, q := range qs {
+					if q < 0 || q >= n {
+						return nil, fmt.Errorf("simulate: MEASURE qubit %d out of range", q)
+					}
+					creg[q] = sv.MeasureBit(q, rng)
+				}
+			case ir.OpIF:
+				if op.CondCbit < 0 || op.CondCbit >= len(creg) {
+					return nil, fmt.Errorf("simulate: IF c[%d] out of range", op.CondCbit)
+				}
+				if creg[op.CondCbit] == op.CondEq {
+					if op.Body == nil {
+						return nil, fmt.Errorf("simulate: IF missing body")
+					}
+					if err := apply(sv, *op.Body); err != nil {
+						return nil, err
+					}
+					noise.ApplyAfterGate(sv, op.Body.Qubits, rng)
+				}
+			case ir.OpBARRIER:
+				// no-op
+			default:
+				if err := apply(sv, op); err != nil {
+					return nil, err
+				}
+				if op.Kind != ir.OpRESET {
+					noise.ApplyAfterGate(sv, op.Qubits, rng)
+				}
+			}
+		}
+		// Final sample of full register (+ optional readout error)
+		one := sv.Sample(1, rng)
+		for k, v := range one {
+			k = noise.ApplyReadout(k, rng)
+			counts[k] += v
+		}
+	}
+	return &Result{NumQubits: n, Shots: shots, Counts: counts}, nil
 }
 
 func apply(sv *StateVector, op ir.Op) error {

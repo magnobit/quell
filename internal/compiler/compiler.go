@@ -22,6 +22,42 @@ const (
 	TargetBraket   Target = "braket"
 )
 
+// CompileProgram generates target code from an already-lowered IR program.
+// This is the adapter contract path: Quell → IR → (optional optimize) → backend text.
+func CompileProgram(prog *ir.Program, target Target, optimize bool) (string, []string, error) {
+	if prog == nil {
+		return "", nil, fmt.Errorf("nil program")
+	}
+	if ir.NeedsBind(prog) {
+		return "", nil, fmt.Errorf("circuit has unbound parameters %v — bind with concrete angles before compile", ir.UnboundParams(prog))
+	}
+
+	p := prog
+	var notes []string
+	if optimize {
+		p, notes = optimizer.Optimize(prog)
+	}
+
+	var code string
+	var err error
+	switch target {
+	case TargetOpenQASM:
+		code, err = toOpenQASM(p)
+	case TargetQiskit:
+		code, err = toQiskit(p)
+	case TargetCirq:
+		code, err = toCirq(p)
+	case TargetBraket:
+		code, err = toBraket(p)
+	default:
+		return "", nil, fmt.Errorf("unknown target: %s (valid: openqasm, qiskit, cirq, braket)", target)
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	return code, notes, nil
+}
+
 // Compile lowers a parsed Circuit to the Quell IR (internal/ir), optionally
 // runs the conservative optimizer passes (internal/optimizer) over it, and
 // generates code for the specified target language.
@@ -30,30 +66,7 @@ const (
 // (nil when optimize is false or nothing changed), and an error.
 func Compile(c *parser.Circuit, target Target, optimize bool) (string, []string, error) {
 	prog := ir.Lower(c)
-
-	var notes []string
-	if optimize {
-		prog, notes = optimizer.Optimize(prog)
-	}
-
-	var code string
-	var err error
-	switch target {
-	case TargetOpenQASM:
-		code, err = toOpenQASM(prog)
-	case TargetQiskit:
-		code, err = toQiskit(prog)
-	case TargetCirq:
-		code, err = toCirq(prog)
-	case TargetBraket:
-		code, err = toBraket(prog)
-	default:
-		return "", nil, fmt.Errorf("unknown target: %s (valid: openqasm, qiskit, cirq, braket)", target)
-	}
-	if err != nil {
-		return "", nil, err
-	}
-	return code, notes, nil
+	return CompileProgram(prog, target, optimize)
 }
 
 func numQubits(p *ir.Program) int {
@@ -187,6 +200,16 @@ func opToOpenQASM(op ir.Op) (string, error) {
 	case ir.OpRESET:
 		if err := checkOp(op, 1, 0); err != nil { return "", err }
 		return fmt.Sprintf("reset %s;", q(op.Qubits[0])), nil
+	case ir.OpIF:
+		if op.Body == nil {
+			return "", fmt.Errorf("IF missing body")
+		}
+		body, err := opToOpenQASM(*op.Body)
+		if err != nil {
+			return "", err
+		}
+		body = strings.TrimSuffix(strings.TrimSpace(body), ";")
+		return fmt.Sprintf("if (c[%d] == %d) { %s; }", op.CondCbit, op.CondEq, body), nil
 	default:
 		return "", fmt.Errorf("unsupported gate %q", op.Kind)
 	}

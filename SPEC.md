@@ -104,7 +104,7 @@ import "./lib/bell_pair.quell"
 MEASURE
 ```
 
-`import "path"` splices another file's source in at that point — this is preprocessor-`#include` semantics, **not** a module/namespace system: there is no scoping, and an imported file's named qubits share the importing file's qubit namespace (as if its text had been pasted in directly). This is deliberately simpler than the "subroutines and gate definitions" roadmap item below, which is a real callable/parameterized unit — imports are just reusable circuit fragments, not functions.
+`import "path"` splices another file's source in at that point — this is preprocessor-`#include` semantics, **not** a module/namespace system: there is no scoping, and an imported file's named qubits share the importing file's qubit namespace (as if its text had been pasted in directly). Gate definitions (`gate … { }`) are the callable/parameterized unit for reusable fragments within a single file; imports remain paste-in circuit text.
 
 Rules:
 - A path starting with `.` (`./` or `../`) is a plain relative filesystem path, resolved against the importing file's own directory.
@@ -190,6 +190,65 @@ Circuits should end with a `MEASURE` instruction. Without it, the simulation alw
 `BARRIER` prevents the backend from reordering gates across the barrier during optimisation.
 `RESET` is a mid-circuit operation; it has no effect when used as the last operation on a qubit.
 
+### Parameters
+
+```quell
+PARAM theta
+RX theta 0
+MEASURE
+```
+
+Bind at run time: `quell run file.quell --param theta=1.5708`.
+
+### Conditionals
+
+```quell
+H 0
+MEASURE 0
+IF c[0]==1 X 1
+MEASURE
+```
+
+Local simulator (and Practice) run a per-shot mid-circuit MEASURE + IF path. OpenQASM 3 export emits `if`.
+
+### Gate definitions (macros)
+
+Expanded at parse time into built-in gates (not a separate runtime call stack):
+
+```quell
+gate bell a b {
+  H a
+  CNOT a b
+}
+bell 0 1
+MEASURE
+```
+
+Single-line form: `gate bell a b { H a; CNOT a b }`.
+
+### Noise models (local sim)
+
+Stochastic (trajectory) channels applied after each gated qubit. Not a density-matrix simulator.
+
+```quell
+NOISE depolarizing 0.01
+NOISE amplitude_damping 0.05
+H 0
+CNOT 0 1
+MEASURE
+```
+
+Or CLI: `quell simulate file.quell --noise depolarizing=0.01 --noise amplitude_damping=0.05`.
+
+| Model | Effect |
+|---|---|
+| `depolarizing` | With probability *p*, apply X, Y, or Z (each *p*/3) |
+| `amplitude_damping` | T1-like jump / damp toward \|0⟩ with rate *γ* (`t1` alias) |
+| `phase_damping` | T2-like dephasing — apply Z with probability *p* (`t2` alias) |
+| `readout` | Classical SPAM: flip each measured bit with probability *p* |
+
+Hardware compile targets ignore `NOISE`; it only affects local simulation.
+
 ---
 
 ## Compile targets
@@ -198,6 +257,8 @@ Circuits should end with a `MEASURE` instruction. Without it, the simulation alw
 
 ```bash
 quell compile --target openqasm bell.quell
+# Thin import (common gates):
+quell convert bell.qasm
 ```
 
 ```openqasm
@@ -529,7 +590,7 @@ Adjacent qubits on the same chip can affect each other even when no gate is appl
 | Histogram shows noise (small wrong-state counts) | Gate errors + readout error |
 | Expected 50/50 split but heavily skewed | Circuit too deep (decoherence) |
 | Results completely wrong | Circuit far exceeds T2 |
-| Simulation is perfect but hardware is not | Normal — simulator has no noise |
+| Simulation is perfect but hardware is not | Normal — use `NOISE` / `--noise` to approximate decoherence locally |
 
 Use the QubitLabs simulator for algorithm development. Switch to real hardware only to characterise noise behaviour or validate a final circuit.
 
@@ -544,14 +605,22 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 - [x] Semantic warnings (no MEASURE, depth, no-op gates) — v0.2.0
 - [x] Panic-safe HTTP compile server with error types — v0.2.0
 - [x] Backend-independent IR (`internal/ir`) and conservative optimizer (`internal/optimizer`) — v0.3.0
+- [x] BackendAdapter interface (`quell/adapter`) — IBM, IonQ, Google, Rigetti, Braket(aws), Azure, NVIDIA, Intel, Simulator(local); IR → OpenQASM inside adapters; third parties via `RegisterPlugin` (`.so` plugins deferred — unsupported on Windows)
 - [x] IonQ, Rigetti, and Azure Quantum backend adapters — v0.3.0
 - [x] File imports (`import "./path.quell"`) and a git-based package manager (`quell pkg`) — v0.4.0
 - [x] QUBO / annealer foundation (`quell/anneal` ParseQUBO) — gate circuits still cannot run on D-Wave
-- [ ] D-Wave Leap submission for QUBO problems
-- [ ] NVIDIA cuQuantum / CUDA-Q GPU simulation adapter (`backend: nvidia` stubbed)
-- [ ] Intel Quantum SDK adapter
-- [ ] Classical registers and conditional gates (`IF c[0]==1 X 1`)
-- [ ] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`)
-- [ ] Parameterized circuits
-- [ ] Native noise models (depolarising, amplitude damping)
-- [ ] QASM 3.0 full import/export
+- [x] D-Wave Leap submission for QUBO problems (Ocean + token; local SA fallback; `QUELL_DWAVE_REQUIRE_LEAP=1` to refuse fallback)
+- [x] NVIDIA cuQuantum / CUDA-Q GPU simulation adapter (`backend: nvidia`; `QUELL_NVIDIA_REQUIRE_CUDAQ=1` to refuse fallback)
+- [x] Intel Quantum SDK path (`backend: intel`; local statevector today; `QUELL_INTEL_REQUIRE_SDK=1` to refuse fallback)
+- [ ] Direct Quantinuum / QuEra / Pasqal / IQM / OQC / Xanadu adapters (catalogued as planned; often via Azure/AWS today)
+- [x] Classical registers and conditional gates (`IF c[0]==1 X 1`) — local sim + OpenQASM 3 export; Practice JS mid-circuit path
+- [x] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`) — parse-time macros
+- [x] Parameterized circuits (`PARAM theta` / `RX theta 0` + `--param theta=1.57`) — bind before sim/compile
+- [x] Native noise models (depolarising, amplitude damping) — stochastic local sim + `NOISE` / `--noise`
+- [x] Quantum Digital Twin / multi-provider estimate (`quell estimate` + Cloud Benchmark; educational cost models)
+- [x] One-click migration + AI optimize (`POST /ai/convert` QASM/Q#; `POST /ai/optimize`; Labs `/migrate` + Assist loop)
+- [x] Hardware-aware routing + noise-aware score (`--coupling heavyhex-toy|linear-N`; SWAP insertion)
+- [x] Hosted package registry (`POST/GET /api/v1/packages`; `quell pkg install|publish`)
+- [x] Research Notebook (`/notebook`; cells, versions, publish to circuits)
+- [x] Marketplace circuit checkout (`POST /circuits/{id}/checkout`; fixture + Stripe payment mode)
+- [ ] QASM 3.0 full import/export (thin import via `quell convert *.qasm` ships; full parity still open)

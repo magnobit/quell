@@ -21,6 +21,7 @@ type Config struct {
 	Azure   AzureConfig   `yaml:"azure"`
 	DWave   DWaveConfig   `yaml:"dwave"`
 	NVIDIA  NVIDIAConfig  `yaml:"nvidia"`
+	Intel   IntelConfig   `yaml:"intel"`
 }
 
 type LocalConfig struct {
@@ -105,6 +106,13 @@ type DWaveConfig struct {
 // NVIDIAConfig is reserved for the cuQuantum / CUDA-Q GPU simulation path.
 type NVIDIAConfig struct {
 	Device string            `yaml:"device"` // e.g. cuda:0
+	Shots  int               `yaml:"shots"`
+	Extra  map[string]string `yaml:"extra"`
+}
+
+// IntelConfig is for the Intel Quantum SDK path (local statevector fallback today).
+type IntelConfig struct {
+	Device string            `yaml:"device"`
 	Shots  int               `yaml:"shots"`
 	Extra  map[string]string `yaml:"extra"`
 }

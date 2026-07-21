@@ -56,6 +56,14 @@ func Optimize(p *ir.Program) (*ir.Program, []string) {
 // touchedQubits returns the qubits an op reads or writes. MEASURE and
 // BARRIER with no explicit qubit list act on every qubit in the circuit.
 func touchedQubits(op ir.Op, numQubits int) []int {
+	if op.Kind == ir.OpIF {
+		// Treat IF as a hard sync barrier across the register.
+		out := make([]int, numQubits)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	}
 	if len(op.Qubits) == 0 && (op.Kind == ir.OpMEASURE || op.Kind == ir.OpBARRIER) {
 		all := make([]int, numQubits)
 		for i := range all {

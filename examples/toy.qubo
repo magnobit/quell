@@ -1,0 +1,5 @@
+# Max-cut style toy QUBO for `quell anneal run`
+n 2
+h 0 -1
+h 1 -1
+q 0 1 2

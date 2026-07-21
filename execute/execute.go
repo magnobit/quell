@@ -27,6 +27,7 @@ const (
 	Azure   = "azure"
 	DWave   = "dwave"
 	NVIDIA  = "nvidia"
+	Intel   = "intel"
 )
 
 // Credential/config types, re-exported so callers don't need (and can't
@@ -42,6 +43,7 @@ type (
 	AzureCredentials   = config.AzureConfig
 	DWaveCredentials   = config.DWaveConfig
 	NVIDIACredentials  = config.NVIDIAConfig
+	IntelCredentials   = config.IntelConfig
 )
 
 // Load reads quell.config.yml (or the given path), expanding ${ENV_VAR}
@@ -87,4 +89,8 @@ func RunDWaveQUBO(cfg *DWaveCredentials, problem *anneal.Problem) (*Result, erro
 
 func RunNVIDIA(cfg *NVIDIACredentials, qasm3 string) (*Result, error) {
 	return backends.RunNVIDIA(cfg, qasm3)
+}
+
+func RunIntel(cfg *IntelCredentials, qasm3 string) (*Result, error) {
+	return backends.RunIntel(cfg, qasm3)
 }

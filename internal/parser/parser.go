@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -15,8 +16,14 @@ type Instruction struct {
 	Gate       string
 	Qubits     []int
 	Args       []float64
+	ArgNames   []string // parallel to Args; non-empty = unbound symbolic param
 	QubitNames []string
 	Line       int // source line number (1-indexed) for diagnostics
+	// Conditional (IF): when Gate=="IF", CondCbit/CondEq describe c[i]==v and
+	// Body holds the single gated instruction to apply when true.
+	CondCbit int
+	CondEq   int
+	Body     *Instruction
 }
 
 // Circuit is the parsed representation of a .quell source file.
@@ -24,7 +31,19 @@ type Circuit struct {
 	Instructions []Instruction
 	NumQubits    int
 	QubitNames   map[string]int
+	Params       []string // unbound symbolic angle names declared/used
 	Warnings     []string // non-fatal issues that compile fine but likely indicate mistakes
+	// Local-sim noise (from NOISE directives). Compile targets ignore these.
+	NoiseDepolarizing     float64
+	NoiseAmplitudeDamping float64
+	NoisePhaseDamping     float64
+	NoiseReadout          float64
+}
+
+// gateDef is a user-defined macro expanded at parse time (not a runtime call).
+type gateDef struct {
+	params []string
+	body   []string // one Quell statement per entry
 }
 
 // gateSpec encodes the expected qubit and float-argument count per gate.
@@ -60,13 +79,15 @@ var gateArity = map[string]gateSpec{
 	"RESET":   {1, 0},
 }
 
-const validGateNames = "H X Y Z S T SDG TDG SX RX RY RZ P U CNOT CZ SWAP ISWAP CRX CRY CRZ CCX CSWAP MEASURE BARRIER RESET"
+const validGateNames = "H X Y Z S T SDG TDG SX RX RY RZ P U CNOT CZ SWAP ISWAP CRX CRY CRZ CCX CSWAP MEASURE BARRIER RESET IF"
 
 // simulatorMaxQubits is the maximum supported by the QubitLabs browser simulator.
 const simulatorMaxQubits = 12
 
 // depthWarnThreshold is the circuit depth at which we warn about hardware decoherence.
 const depthWarnThreshold = 100
+
+var ifLineRe = regexp.MustCompile(`(?i)^IF\s+c\[(\d+)\]\s*==\s*(\d+)\s+(.+)$`)
 
 // Parse parses Quell source code and returns a Circuit.
 //
@@ -84,6 +105,12 @@ func Parse(src string) (*Circuit, error) {
 	maxQubit := -1
 	namedQubits := map[string]int{}
 	nextNamedIdx := 0
+	paramSet := map[string]bool{}
+	gateDefs := map[string]gateDef{}
+	noiseDep := 0.0
+	noiseAmp := 0.0
+	noisePhase := 0.0
+	noiseReadout := 0.0
 
 	scanner := bufio.NewScanner(strings.NewReader(src))
 	lineNum := 0
@@ -101,6 +128,98 @@ func Parse(src string) (*Circuit, error) {
 
 		tokens := strings.Fields(line)
 		keyword := strings.ToUpper(tokens[0])
+
+		// NOISE depolarizing 0.01 | amplitude_damping | phase_damping | readout
+		if keyword == "NOISE" {
+			if len(tokens) < 3 {
+				return nil, fmt.Errorf("line %d: NOISE expects <model> <rate> (e.g. NOISE depolarizing 0.01)", lineNum)
+			}
+			model := strings.ToLower(strings.ReplaceAll(tokens[1], "-", "_"))
+			rate, err := strconv.ParseFloat(tokens[2], 64)
+			if err != nil || rate < 0 || rate > 1 {
+				return nil, fmt.Errorf("line %d: NOISE rate must be a float in [0,1], got %q", lineNum, tokens[2])
+			}
+			switch model {
+			case "depolarizing", "depolarising", "dep":
+				noiseDep = rate
+			case "amplitude_damping", "amp", "t1":
+				noiseAmp = rate
+			case "phase_damping", "dephasing", "t2":
+				noisePhase = rate
+			case "readout", "readout_error", "spam":
+				noiseReadout = rate
+			default:
+				return nil, fmt.Errorf("line %d: unknown noise model %q (depolarizing|amplitude_damping|phase_damping|readout)", lineNum, tokens[1])
+			}
+			continue
+		}
+
+		// gate name p0 p1 { … } — macro expanded at parse time
+		if keyword == "GATE" {
+			name, def, err := parseGateDef(tokens, line, scanner, &lineNum)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", lineNum, err)
+			}
+			if _, builtin := gateArity[name]; builtin {
+				return nil, fmt.Errorf("line %d: cannot redefine built-in gate %s", lineNum, name)
+			}
+			gateDefs[name] = def
+			continue
+		}
+
+		// PARAM theta [, phi] — declare symbolic angles (optional; also inferred from use)
+		if keyword == "PARAM" {
+			for _, tok := range tokens[1:] {
+				name := strings.Trim(tok, ", \t")
+				if name == "" {
+					continue
+				}
+				if !isIdent(name) {
+					return nil, fmt.Errorf("line %d: invalid param name %q", lineNum, name)
+				}
+				paramSet[name] = true
+			}
+			continue
+		}
+
+		// IF c[i]==v GATE … — classical conditional (single body gate)
+		if keyword == "IF" {
+			m := ifLineRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: invalid IF — use IF c[i]==v GATE … (e.g. IF c[0]==1 X 1)", lineNum)
+			}
+			cbit, _ := strconv.Atoi(m[1])
+			eq, _ := strconv.Atoi(m[2])
+			bodyCirc, err := Parse(m[3])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: IF body: %w", lineNum, err)
+			}
+			if len(bodyCirc.Instructions) != 1 {
+				return nil, fmt.Errorf("line %d: IF body must be a single gate", lineNum)
+			}
+			body := bodyCirc.Instructions[0]
+			if body.Gate == "IF" || body.Gate == "MEASURE" {
+				return nil, fmt.Errorf("line %d: IF body cannot be IF or MEASURE", lineNum)
+			}
+			for _, q := range body.Qubits {
+				if q > maxQubit {
+					maxQubit = q
+				}
+			}
+			for _, name := range body.ArgNames {
+				if name != "" {
+					paramSet[name] = true
+				}
+			}
+			if cbit > maxQubit {
+				maxQubit = cbit
+			}
+			bodyCopy := body
+			instructions = append(instructions, Instruction{
+				Gate: "IF", CondCbit: cbit, CondEq: eq, Body: &bodyCopy, Line: lineNum,
+			})
+			continue
+		}
 
 		// Named qubit declaration
 		if keyword == "QUBIT" {
@@ -125,6 +244,43 @@ func Parse(src string) (*Circuit, error) {
 		}
 
 		gate := keyword
+		if def, ok := gateDefs[gate]; ok {
+			callArgs := tokens[1:]
+			if len(callArgs) != len(def.params) {
+				return nil, fmt.Errorf("line %d: gate %s requires %d qubit arg(s), got %d", lineNum, gate, len(def.params), len(callArgs))
+			}
+			subst := map[string]string{}
+			for i, p := range def.params {
+				arg := strings.TrimRight(callArgs[i], ",")
+				if idx, ok := namedQubits[arg]; ok {
+					arg = strconv.Itoa(idx)
+				} else if _, err := strconv.Atoi(arg); err != nil {
+					return nil, fmt.Errorf("line %d: gate %s arg %q is not a qubit index or name", lineNum, gate, arg)
+				}
+				subst[p] = arg
+			}
+			expanded := expandGateBody(def.body, subst)
+			sub, err := Parse(expanded)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: expanding gate %s: %w", lineNum, gate, err)
+			}
+			for _, inst := range sub.Instructions {
+				for _, q := range inst.Qubits {
+					if q > maxQubit {
+						maxQubit = q
+					}
+				}
+				for _, an := range inst.ArgNames {
+					if an != "" {
+						paramSet[an] = true
+					}
+				}
+				inst.Line = lineNum
+				instructions = append(instructions, inst)
+			}
+			continue
+		}
+
 		spec, known := gateArity[gate]
 		if !known {
 			return nil, fmt.Errorf("line %d: unknown gate %q (valid gates: %s)", lineNum, gate, validGateNames)
@@ -133,6 +289,7 @@ func Parse(src string) (*Circuit, error) {
 		var qubits []int
 		var qubitNames []string
 		var args []float64
+		var argNames []string
 
 		for _, tok := range tokens[1:] {
 			tok = strings.TrimRight(tok, ",")
@@ -150,11 +307,17 @@ func Parse(src string) (*Circuit, error) {
 				continue
 			}
 
-			// If gate expects more angle args, consume as angle.
-			// Handles both "RX 1.5708 0" and "RX 1 0" (integer promoted to float).
+			// If gate expects more angle args, consume as angle or symbolic param.
 			if spec.args > 0 && len(args) < spec.args {
 				if f, ok := evalAngle(tok); ok {
 					args = append(args, f)
+					argNames = append(argNames, "")
+					continue
+				}
+				if isIdent(tok) && !isGateName(tok) {
+					args = append(args, 0)
+					argNames = append(argNames, tok)
+					paramSet[tok] = true
 					continue
 				}
 			}
@@ -175,6 +338,7 @@ func Parse(src string) (*Circuit, error) {
 			// Float angle in non-standard position
 			if f, ok := evalAngle(tok); ok {
 				args = append(args, f)
+				argNames = append(argNames, "")
 				continue
 			}
 
@@ -187,7 +351,7 @@ func Parse(src string) (*Circuit, error) {
 		}
 		// Validate angle arg count
 		if len(args) != spec.args {
-			return nil, fmt.Errorf("line %d: %s requires %d angle argument(s), got %d — use float or PI notation (e.g. PI/2)", lineNum, gate, spec.args, len(args))
+			return nil, fmt.Errorf("line %d: %s requires %d angle argument(s), got %d — use float, PI notation, or a param name (e.g. theta)", lineNum, gate, spec.args, len(args))
 		}
 		// Validate no duplicate qubits on multi-qubit gates (CNOT 0 0 is invalid)
 		if spec.qubits >= 2 {
@@ -204,6 +368,7 @@ func Parse(src string) (*Circuit, error) {
 			Gate:       gate,
 			Qubits:     qubits,
 			Args:       args,
+			ArgNames:   argNames,
 			QubitNames: qubitNames,
 			Line:       lineNum,
 		})
@@ -220,12 +385,126 @@ func Parse(src string) (*Circuit, error) {
 
 	warnings := validateCircuit(instructions, nq)
 
+	params := make([]string, 0, len(paramSet))
+	for name := range paramSet {
+		params = append(params, name)
+	}
+
 	return &Circuit{
-		Instructions: instructions,
-		NumQubits:    nq,
-		QubitNames:   namedQubits,
-		Warnings:     warnings,
+		Instructions:          instructions,
+		NumQubits:             nq,
+		QubitNames:            namedQubits,
+		Params:                params,
+		Warnings:              warnings,
+		NoiseDepolarizing:     noiseDep,
+		NoiseAmplitudeDamping: noiseAmp,
+		NoisePhaseDamping:     noisePhase,
+		NoiseReadout:          noiseReadout,
 	}, nil
+}
+
+// parseGateDef parses `gate name p0 p1 { body }` spanning one or more lines.
+// lineNum points at the GATE line on entry and is advanced for body lines.
+func parseGateDef(tokens []string, line string, scanner *bufio.Scanner, lineNum *int) (string, gateDef, error) {
+	if len(tokens) < 2 {
+		return "", gateDef{}, fmt.Errorf("gate requires a name")
+	}
+	name := strings.ToUpper(strings.TrimRight(tokens[1], "{,"))
+	if !isIdent(name) {
+		return "", gateDef{}, fmt.Errorf("invalid gate name %q", tokens[1])
+	}
+
+	idx := strings.Index(strings.ToUpper(line), "GATE")
+	if idx < 0 {
+		return "", gateDef{}, fmt.Errorf("malformed gate header")
+	}
+	afterGate := strings.TrimSpace(line[idx+4:])
+	// drop name
+	if !strings.HasPrefix(strings.ToUpper(afterGate), name) {
+		// name may be mixed case in source
+		parts := strings.Fields(afterGate)
+		if len(parts) == 0 {
+			return "", gateDef{}, fmt.Errorf("malformed gate header")
+		}
+		afterGate = strings.TrimSpace(afterGate[len(parts[0]):])
+	} else {
+		// strip case-insensitively by original token length
+		origName := tokens[1]
+		afterGate = strings.TrimSpace(afterGate[len(origName):])
+	}
+
+	brace := strings.Index(afterGate, "{")
+	if brace < 0 {
+		return "", gateDef{}, fmt.Errorf("gate %s: expected { … } body", name)
+	}
+	paramPart := strings.TrimSpace(afterGate[:brace])
+	bodyText := afterGate[brace+1:]
+
+	var params []string
+	for _, tok := range strings.Fields(strings.ReplaceAll(paramPart, ",", " ")) {
+		tok = strings.Trim(tok, ", \t")
+		if tok == "" {
+			continue
+		}
+		if !isIdent(tok) {
+			return "", gateDef{}, fmt.Errorf("invalid gate param %q", tok)
+		}
+		params = append(params, tok)
+	}
+
+	if j := strings.Index(bodyText, "}"); j >= 0 {
+		bodyText = bodyText[:j]
+	} else {
+		var b strings.Builder
+		b.WriteString(bodyText)
+		b.WriteByte('\n')
+		for scanner.Scan() {
+			*lineNum++
+			raw := scanner.Text()
+			if ci := strings.Index(raw, "//"); ci >= 0 {
+				raw = raw[:ci]
+			}
+			if j := strings.Index(raw, "}"); j >= 0 {
+				b.WriteString(raw[:j])
+				bodyText = b.String()
+				goto parsedBody
+			}
+			b.WriteString(raw)
+			b.WriteByte('\n')
+		}
+		return "", gateDef{}, fmt.Errorf("gate %s: missing closing }", name)
+	}
+
+parsedBody:
+	var body []string
+	for _, part := range strings.FieldsFunc(bodyText, func(r rune) bool {
+		return r == ';' || r == '\n'
+	}) {
+		s := strings.TrimSpace(part)
+		if s != "" {
+			body = append(body, s)
+		}
+	}
+	if len(body) == 0 {
+		return "", gateDef{}, fmt.Errorf("gate %s: empty body", name)
+	}
+	return name, gateDef{params: params, body: body}, nil
+}
+
+func expandGateBody(body []string, subst map[string]string) string {
+	var b strings.Builder
+	for _, line := range body {
+		toks := strings.Fields(line)
+		for i, tok := range toks {
+			clean := strings.TrimRight(tok, ",")
+			if repl, ok := subst[clean]; ok {
+				toks[i] = repl
+			}
+		}
+		b.WriteString(strings.Join(toks, " "))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // validateCircuit runs semantic checks on a complete parsed circuit and returns
@@ -388,4 +667,27 @@ func evalAngle(tok string) (float64, bool) {
 func isInt(s string) bool {
 	_, err := strconv.Atoi(s)
 	return err == nil
+}
+
+func isIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && r != '_' {
+				return false
+			}
+			continue
+		}
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func isGateName(s string) bool {
+	_, ok := gateArity[strings.ToUpper(s)]
+	return ok
 }
