@@ -207,13 +207,25 @@ azure:
 
 Auth uses the Azure AD OAuth2 client-credentials flow (service principal). Quell exchanges your credentials for a bearer token, then submits, polls, and fetches results from the configured workspace/target.
 
-### D-Wave — not supported
+### D-Wave — QUBO / annealer (not gate Quell)
 
-```yaml
-backend: dwave
+Gate-model `.quell` cannot run on D-Wave. Use QUBO text instead:
+
+```bash
+quell anneal run problem.qubo
 ```
 
-D-Wave builds quantum annealers (QUBO/Ising optimization), not gate-model devices. A compiled `.quell` gate circuit has no meaningful way to run on one, so `backend: dwave` always returns a clear error instead of pretending to submit something. Proper D-Wave support would need a separate QUBO/Ising program representation.
+```
+# or // comments
+n 2
+h 0 -1
+h 1 -1
+q 0 1 2
+```
+
+With `DWAVE_API_TOKEN` and the Ocean SDK, samples go to Leap; otherwise Quell
+uses local simulated annealing. Cloud: pick D-Wave and submit `kind=qubo`.
+Set `QUELL_DWAVE_REQUIRE_LEAP=1` to refuse the local fallback.
 
 ### Local (default)
 
@@ -284,13 +296,16 @@ Angles are in radians. Common values: `π/2 = 1.5708`, `π/4 = 0.7854`, `π = 3.
 | Target | Flag | Language | Used by |
 |---|---|---|---|
 | OpenQASM 3 | `--target openqasm` | openqasm | IBM, AWS, Google, any hardware |
+| OpenQASM 2 | `--target openqasm2` | openqasm | Legacy QASM tools |
 | Qiskit | `--target qiskit` | Python | IBM Quantum / Aer simulator |
 | Cirq | `--target cirq` | Python | Google Quantum AI |
 | Braket SDK | `--target braket` | Python | AWS Braket |
+| Q# | `--target qsharp` | Q# | Azure Quantum / Microsoft QDK |
 
 ```bash
 quell compile --target qiskit   --output bell_qiskit.py  examples/bell.quell
 quell compile --target openqasm --output bell.qasm        examples/bell.quell
+quell compile --target qsharp   --output bell.qs         examples/bell.quell
 ```
 
 ---

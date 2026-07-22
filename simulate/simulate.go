@@ -370,8 +370,15 @@ func RunProgramOpts(p *ir.Program, opt Options) (*Result, error) {
 
 	hasIF := false
 	for _, op := range p.Ops {
-		if op.Kind == ir.OpIF {
+		switch op.Kind {
+		case ir.OpIF, ir.OpWHILE, ir.OpSWITCH, ir.OpASSERT:
 			hasIF = true
+		case ir.OpMEASURE:
+			if len(op.MeasTargets) > 0 {
+				hasIF = true // remapped measure needs creg trajectory
+			}
+		}
+		if hasIF {
 			break
 		}
 	}
@@ -384,6 +391,17 @@ func RunProgramOpts(p *ir.Program, opt Options) (*Result, error) {
 	for _, op := range p.Ops {
 		if op.Kind == ir.OpMEASURE {
 			break
+		}
+		if op.Kind == ir.OpPAR {
+			for _, bop := range op.Then {
+				if err := apply(sv, bop); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		if op.Kind == ir.OpASSERT {
+			continue // no classical bits yet in unitary path
 		}
 		if err := apply(sv, op); err != nil {
 			return nil, err
@@ -417,31 +435,116 @@ func runTrajectories(p *ir.Program, shots, n int, noise NoiseModel, seed int64) 
 		for _, op := range p.Ops {
 			switch op.Kind {
 			case ir.OpMEASURE:
-				qs := op.Qubits
-				if len(qs) == 0 {
-					qs = make([]int, n)
-					for i := range qs {
-						qs[i] = i
-					}
-				}
-				for _, q := range qs {
-					if q < 0 || q >= n {
-						return nil, fmt.Errorf("simulate: MEASURE qubit %d out of range", q)
-					}
-					creg[q] = sv.MeasureBit(q, rng)
+				if err := applyMeasure(sv, op, creg, n, rng); err != nil {
+					return nil, err
 				}
 			case ir.OpIF:
-				if op.CondCbit < 0 || op.CondCbit >= len(creg) {
-					return nil, fmt.Errorf("simulate: IF c[%d] out of range", op.CondCbit)
+				ok, err := evalCond(creg, op)
+				if err != nil {
+					return nil, err
 				}
-				if creg[op.CondCbit] == op.CondEq {
-					if op.Body == nil {
+				runBody := func(body []ir.Op) error {
+					for _, bop := range body {
+						if err := apply(sv, bop); err != nil {
+							return err
+						}
+						if bop.Kind != ir.OpRESET && bop.Kind != ir.OpBARRIER {
+							noise.ApplyAfterGate(sv, bop.Qubits, rng)
+						}
+					}
+					return nil
+				}
+				if ok {
+					if len(op.Then) > 0 {
+						if err := runBody(op.Then); err != nil {
+							return nil, err
+						}
+					} else if op.Body != nil {
+						if err := apply(sv, *op.Body); err != nil {
+							return nil, err
+						}
+						noise.ApplyAfterGate(sv, op.Body.Qubits, rng)
+					} else {
 						return nil, fmt.Errorf("simulate: IF missing body")
 					}
-					if err := apply(sv, *op.Body); err != nil {
+				} else if len(op.Else) > 0 {
+					if err := runBody(op.Else); err != nil {
 						return nil, err
 					}
-					noise.ApplyAfterGate(sv, op.Body.Qubits, rng)
+				}
+			case ir.OpWHILE:
+				if op.MaxIter < 1 {
+					return nil, fmt.Errorf("simulate: WHILE requires MaxIter >= 1")
+				}
+				for iter := 0; iter < op.MaxIter; iter++ {
+					ok, err := evalCond(creg, op)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						break
+					}
+					for _, bop := range op.Then {
+						if bop.Kind == ir.OpMEASURE {
+							if err := applyMeasure(sv, bop, creg, n, rng); err != nil {
+								return nil, err
+							}
+							continue
+						}
+						if err := apply(sv, bop); err != nil {
+							return nil, err
+						}
+						if bop.Kind != ir.OpRESET && bop.Kind != ir.OpBARRIER {
+							noise.ApplyAfterGate(sv, bop.Qubits, rng)
+						}
+					}
+				}
+			case ir.OpSWITCH:
+				val, err := switchDisc(creg, op)
+				if err != nil {
+					return nil, err
+				}
+				var chosen []ir.Op
+				var def []ir.Op
+				matched := false
+				for _, arm := range op.Cases {
+					if arm.Default {
+						def = arm.Body
+						continue
+					}
+					if arm.Value == val {
+						chosen = arm.Body
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					chosen = def
+				}
+				for _, bop := range chosen {
+					if err := apply(sv, bop); err != nil {
+						return nil, err
+					}
+					if bop.Kind != ir.OpRESET && bop.Kind != ir.OpBARRIER {
+						noise.ApplyAfterGate(sv, bop.Qubits, rng)
+					}
+				}
+			case ir.OpPAR:
+				for _, bop := range op.Then {
+					if err := apply(sv, bop); err != nil {
+						return nil, err
+					}
+					if bop.Kind != ir.OpRESET && bop.Kind != ir.OpBARRIER {
+						noise.ApplyAfterGate(sv, bop.Qubits, rng)
+					}
+				}
+			case ir.OpASSERT:
+				ok, err := evalCond(creg, op)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					return nil, fmt.Errorf("simulate: ASSERT failed (shot %d): %s", s, formatCond(op))
 				}
 			case ir.OpBARRIER:
 				// no-op
@@ -462,6 +565,83 @@ func runTrajectories(p *ir.Program, shots, n int, noise NoiseModel, seed int64) 
 		}
 	}
 	return &Result{NumQubits: n, Shots: shots, Counts: counts}, nil
+}
+
+func applyMeasure(sv *StateVector, op ir.Op, creg []int, n int, rng *rand.Rand) error {
+	qs := op.Qubits
+	if len(qs) == 0 {
+		qs = make([]int, n)
+		for i := range qs {
+			qs[i] = i
+		}
+	}
+	for i, q := range qs {
+		if q < 0 || q >= n {
+			return fmt.Errorf("simulate: MEASURE qubit %d out of range", q)
+		}
+		bit := sv.MeasureBit(q, rng)
+		dst := q
+		if i < len(op.MeasTargets) {
+			dst = op.MeasTargets[i]
+		}
+		if dst < 0 || dst >= len(creg) {
+			return fmt.Errorf("simulate: MEASURE target c[%d] out of range", dst)
+		}
+		creg[dst] = bit
+	}
+	return nil
+}
+
+func evalCond(creg []int, op ir.Op) (bool, error) {
+	if op.CondRightBit >= 0 {
+		if op.CondCbit < 0 || op.CondCbit >= len(creg) {
+			return false, fmt.Errorf("simulate: condition c[%d] out of range", op.CondCbit)
+		}
+		if op.CondRightBit >= len(creg) {
+			return false, fmt.Errorf("simulate: condition c[%d] out of range", op.CondRightBit)
+		}
+		return creg[op.CondCbit] == creg[op.CondRightBit], nil
+	}
+	if op.CondCbit < 0 {
+		// int(c) == CondEq — little-endian bits
+		v := 0
+		for i := 0; i < len(creg); i++ {
+			if creg[i] != 0 {
+				v |= 1 << i
+			}
+		}
+		return v == op.CondEq, nil
+	}
+	if op.CondCbit >= len(creg) {
+		return false, fmt.Errorf("simulate: condition c[%d] out of range", op.CondCbit)
+	}
+	return creg[op.CondCbit] == op.CondEq, nil
+}
+
+func switchDisc(creg []int, op ir.Op) (int, error) {
+	if op.CondCbit < 0 {
+		v := 0
+		for i := 0; i < len(creg); i++ {
+			if creg[i] != 0 {
+				v |= 1 << i
+			}
+		}
+		return v, nil
+	}
+	if op.CondCbit >= len(creg) {
+		return 0, fmt.Errorf("simulate: SWITCH c[%d] out of range", op.CondCbit)
+	}
+	return creg[op.CondCbit], nil
+}
+
+func formatCond(op ir.Op) string {
+	if op.CondRightBit >= 0 {
+		return fmt.Sprintf("c[%d]==c[%d]", op.CondCbit, op.CondRightBit)
+	}
+	if op.CondCbit < 0 {
+		return fmt.Sprintf("c==%d", op.CondEq)
+	}
+	return fmt.Sprintf("c[%d]==%d", op.CondCbit, op.CondEq)
 }
 
 func apply(sv *StateVector, op ir.Op) error {

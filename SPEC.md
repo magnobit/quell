@@ -193,14 +193,19 @@ Circuits should end with a `MEASURE` instruction. Without it, the simulation alw
 ### Parameters
 
 ```quell
-PARAM theta
+PARAM theta : angle
 RX theta 0
 MEASURE
 ```
 
+`PARAM theta` (untyped) is also accepted. Type annotations are `angle`, `float`, or `real`.
 Bind at run time: `quell run file.quell --param theta=1.5708`.
 
 ### Conditionals
+
+Conditions may be `c[i]==v`, `c[i]==c[j]`, or `c==v` (little-endian integer over the classical register).
+
+Line form (single gate):
 
 ```quell
 H 0
@@ -209,7 +214,106 @@ IF c[0]==1 X 1
 MEASURE
 ```
 
-Local simulator (and Practice) run a per-shot mid-circuit MEASURE + IF path. OpenQASM 3 export emits `if`.
+Block form with optional ELSE:
+
+```quell
+H 0
+MEASURE 0
+IF c[0]==1 {
+  X 1
+  H 1
+}
+ELSE {
+  Z 1
+}
+MEASURE
+```
+
+Bit-vs-bit and register equality:
+
+```quell
+H 0
+H 1
+MEASURE 0 -> c[0]
+MEASURE 1 -> c[1]
+IF c[0]==c[1] X 2
+MEASURE
+```
+
+### SWITCH
+
+```quell
+H 0
+H 1
+MEASURE 0
+MEASURE 1
+SWITCH c {
+  CASE 0: X 2
+  CASE 1: Y 2
+  CASE 2: Z 2
+  DEFAULT: H 2
+}
+MEASURE
+```
+
+Discriminant is `c[i]` or whole register `c`.
+
+### MEASURE targets
+
+```quell
+H 0
+MEASURE 0 -> c[1]
+```
+
+Default `MEASURE q` still writes `c[q]`. Arrow form requires an explicit qubit list.
+
+### PAR (commuting layer)
+
+```quell
+PAR {
+  H 0
+  H 1
+}
+MEASURE
+```
+
+Gates in a `PAR` block must use disjoint qubits. Simulation runs them sequentially; depth treats the block as one parallel layer intent.
+
+### ASSERT (local sim only)
+
+```quell
+X 0
+MEASURE 0
+ASSERT c[0]==1
+MEASURE
+```
+
+Compile targets emit a comment; local / Practice simulators fail the shot (or run) if the condition is false.
+
+### Loops
+
+`FOR` unrolls at parse/compile time (inclusive range):
+
+```quell
+FOR i IN 0..3 {
+  H i
+}
+MEASURE
+```
+
+`WHILE` is bounded (required `MAX`) for local simulation safety:
+
+```quell
+H 0
+MEASURE 0
+WHILE c[0]==0 MAX 8 {
+  X 0
+  MEASURE 0
+}
+MEASURE
+```
+
+Local simulator (and Practice) run a per-shot mid-circuit MEASURE + IF/WHILE/SWITCH path. OpenQASM 3 export emits `if` / `else` / `while` / `switch`.
 
 ### Gate definitions (macros)
 
@@ -472,14 +576,27 @@ dwave:
 poll → results shape as IBM/AWS/Google — Quell compiles the circuit once and
 submits it to whichever backend is configured.
 
-**D-Wave is not supported.** D-Wave builds quantum annealers, which solve
-QUBO/Ising optimization problems by relaxing a system into its ground
-state — they have no gate-model execution path at all. A compiled `.quell`
-gate circuit cannot run on a D-Wave solver as-is, so `backend: dwave`
-always returns an error explaining this rather than silently submitting
-something meaningless. Supporting D-Wave properly would require a separate
-QUBO/Ising program representation (and Quell syntax to author them), which
-is a larger, separate effort from the gate-model compiler documented here.
+**D-Wave is annealer-only (not gate Quell).** D-Wave solvers take QUBO/Ising
+problems, not gate circuits. Use a separate text format via `quell/anneal`
+(`ParseQUBO`), Cloud execute with `kind=qubo`, or:
+
+```bash
+quell anneal run problem.qubo          # Leap if DWAVE_API_TOKEN + Ocean; else local SA
+quell anneal run problem.qubo --local  # force local simulated annealing
+```
+
+Minimal `.qubo` format (`#` or `//` comments):
+
+```
+# max-cut toy
+n 2
+h 0 -1
+h 1 -1
+q 0 1 2
+```
+
+Gate-model `backend: dwave` / OpenQASM submit still errors on purpose — do not
+send `.quell` gate source to an annealer.
 
 ---
 
@@ -614,7 +731,10 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 - [x] Intel Quantum SDK path (`backend: intel`; local statevector today; `QUELL_INTEL_REQUIRE_SDK=1` to refuse fallback)
 - [ ] Direct Quantinuum / QuEra / Pasqal / IQM / OQC / Xanadu adapters (catalogued as planned; often via Azure/AWS today)
 - [x] Classical registers and conditional gates (`IF c[0]==1 X 1`) — local sim + OpenQASM 3 export; Practice JS mid-circuit path
+- [x] Block `IF` / `ELSE` and bounded `WHILE` / parse-time `FOR` — v0.5 control flow
+- [x] Richer conditions (`c[i]==c[j]`, `c==v`), `SWITCH`, `MEASURE q -> c[i]`, `PAR`, typed `PARAM`, `ASSERT`
 - [x] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`) — parse-time macros
+- [x] Decomposition-backed converters (RXX/RYY/RZZ, PhasedXPowGate, …) via `quell/decompose`
 - [x] Parameterized circuits (`PARAM theta` / `RX theta 0` + `--param theta=1.57`) — bind before sim/compile
 - [x] Native noise models (depolarising, amplitude damping) — stochastic local sim + `NOISE` / `--noise`
 - [x] Quantum Digital Twin / multi-provider estimate (`quell estimate` + Cloud Benchmark; educational cost models)

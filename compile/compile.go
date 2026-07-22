@@ -1,12 +1,14 @@
 // Copyright 2026 Magnobit, Inc. All rights reserved.
 
 // Package compile is the public API for compiling Quell source code to
-// third-party quantum SDK formats (Qiskit, OpenQASM 3, Cirq, Braket).
+// third-party quantum SDK formats (Qiskit, OpenQASM 3, Cirq, Braket, Q#).
 package compile
 
 import (
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/parser"
+	"github.com/magnobit/quell/log"
+	"github.com/magnobit/quell/qerr"
 )
 
 // Target is a supported compilation target.
@@ -14,14 +16,16 @@ type Target = compiler.Target
 
 // Supported compile targets.
 const (
-	Qiskit   Target = compiler.TargetQiskit
-	OpenQASM Target = compiler.TargetOpenQASM
-	Cirq     Target = compiler.TargetCirq
-	Braket   Target = compiler.TargetBraket
+	Qiskit    Target = compiler.TargetQiskit
+	OpenQASM  Target = compiler.TargetOpenQASM
+	OpenQASM2 Target = compiler.TargetOpenQASM2
+	Cirq      Target = compiler.TargetCirq
+	Braket    Target = compiler.TargetBraket
+	QSharp    Target = compiler.TargetQSharp
 )
 
 // Targets is the ordered list of all supported targets.
-var Targets = []Target{Qiskit, OpenQASM, Cirq, Braket}
+var Targets = []Target{Qiskit, OpenQASM, OpenQASM2, Cirq, Braket, QSharp}
 
 // CompileResult holds compiled output, any non-fatal semantic warnings, and
 // any notes from the IR optimizer. Warnings describe issues that compile
@@ -67,9 +71,16 @@ func Compile(src string, target Target) (string, error) {
 func CompileWithWarnings(src string, target Target, optimize bool) (CompileResult, error) {
 	c, err := parser.Parse(src)
 	if err != nil {
-		return CompileResult{}, err
+		log.Error("parse failed", "err", err, "target", string(target))
+		return CompileResult{}, qerr.Wrap(qerr.KindParse, "compile", err)
 	}
-	return compileCircuit(c, target, optimize)
+	r, err := compileCircuit(c, target, optimize)
+	if err != nil {
+		log.Error("compile failed", "err", err, "target", string(target), "qubits", c.NumQubits)
+		return CompileResult{}, qerr.Compile("compile", err)
+	}
+	log.Debug("compile ok", "target", string(target), "qubits", r.NumQubits, "ops", r.NumInstructions, "warnings", len(r.Warnings))
+	return r, nil
 }
 
 // CompileFile parses the .quell file at path — resolving any "import"
@@ -90,9 +101,16 @@ func CompileFile(path string, target Target) (string, error) {
 func CompileFileWithWarnings(path string, target Target, optimize bool) (CompileResult, error) {
 	c, err := parser.ParseFile(path)
 	if err != nil {
-		return CompileResult{}, err
+		log.Error("parse file failed", "path", path, "err", err)
+		return CompileResult{}, qerr.Wrap(qerr.KindParse, "compile", err)
 	}
-	return compileCircuit(c, target, optimize)
+	r, err := compileCircuit(c, target, optimize)
+	if err != nil {
+		log.Error("compile file failed", "path", path, "err", err, "target", string(target))
+		return CompileResult{}, qerr.Compile("compile", err)
+	}
+	log.Info("compiled", "path", path, "target", string(target), "qubits", r.NumQubits)
+	return r, nil
 }
 
 func compileCircuit(c *parser.Circuit, target Target, optimize bool) (CompileResult, error) {

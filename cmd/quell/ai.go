@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/magnobit/quell/convert"
 	"github.com/magnobit/quell/internal/qasmimport"
 	"github.com/spf13/cobra"
 )
@@ -40,14 +41,20 @@ func newAskCmd() *cobra.Command {
 
 func newConvertCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "convert <file.py|file.qasm>",
-		Short: "Convert Python/Qiskit (AI) or OpenQASM 3 (local) to Quell",
+		Use:   "convert <file.py|file.qasm|file.qs>",
+		Short: "Convert OpenQASM (local) or Python/Q# (AI) to Quell",
 		Long: `Convert circuits into Quell.
 
-  • .qasm / .qasm3 — thin local OpenQASM 3 → Quell import (common gates; no API key)
-  • .py — Claude-assisted Qiskit/Python conversion (needs ANTHROPIC_API_KEY)`,
+  • .qasm / .qasm2 / .qasm3 — local OpenQASM → Quell (no API key; # // /* */ comments ignored)
+  • .py / .qs — Claude-assisted when ANTHROPIC_API_KEY is set
+  • For deterministic Qiskit/Cirq/Q#/Braket import without an API key, use Labs Migrate
+    or POST /api/v1/ai/convert (language=qiskit|cirq|qsharp|braket|openqasm).
+
+Export Quell → other languages with:
+  quell compile --target qiskit|cirq|openqasm|openqasm2|braket|qsharp file.quell`,
 		Example: `  quell convert bell.qasm
-  quell convert my_qiskit_circuit.py`,
+  quell convert my_qiskit_circuit.py
+  quell compile --target qsharp bell.quell`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := args[0]
@@ -57,8 +64,9 @@ func newConvertCmd() *cobra.Command {
 				return err
 			}
 			src := string(data)
+			lang := convert.DetectLanguage(src, path)
 
-			if strings.HasSuffix(lower, ".qasm") || strings.HasSuffix(lower, ".qasm3") {
+			if strings.HasSuffix(lower, ".qasm") || strings.HasSuffix(lower, ".qasm2") || strings.HasSuffix(lower, ".qasm3") || lang == "openqasm" {
 				out, err := qasmimport.ToQuell(src)
 				if err != nil {
 					return fmt.Errorf("qasm import: %w", err)
@@ -69,26 +77,27 @@ func newConvertCmd() *cobra.Command {
 
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
 			if apiKey == "" {
-				return fmt.Errorf("ANTHROPIC_API_KEY not set — run: export ANTHROPIC_API_KEY=your-key (or pass a .qasm file for local import)")
+				return fmt.Errorf("%s → Quell needs ANTHROPIC_API_KEY for CLI, or use Labs Migrate / POST /api/v1/ai/convert with language=%s (OpenQASM files convert locally without a key)", lang, lang)
 			}
-			if !strings.HasSuffix(lower, ".py") && !strings.HasSuffix(lower, ".quell") {
-				return fmt.Errorf("expected .py, .qasm, or .qasm3 file, got: %s", filepath.Ext(path))
+			ext := filepath.Ext(path)
+			if ext != ".py" && ext != ".qs" && ext != ".qsharp" && ext != ".quell" {
+				return fmt.Errorf("expected .py, .qs, .qasm, or .qasm3 file, got: %s", ext)
 			}
-			prompt := fmt.Sprintf(`Convert the following Python quantum code to Quell language.
+			prompt := fmt.Sprintf(`Convert the following %s quantum code to Quell language.
 
 Quell syntax: one gate per line, uppercase gate name, then qubit indices, then args.
 Examples:
-  H 0         (Hadamard on qubit 0)
-  CNOT 0 1    (CNOT, control=0, target=1)
-  RX 1.5708 0 (RX rotation by pi/2 on qubit 0)
-  MEASURE     (measure all)
+  H 0
+  CNOT 0 1
+  RX 1.5708 0
+  MEASURE
 
-Only output valid Quell code with comments explaining any non-obvious choices. No Python.
+Only output valid Quell code. Ignore commented-out gates.
 
-Python code:
-%s`, src)
+Source (%s):
+%s`, lang, lang, src)
 
-			response, err := callClaude(apiKey, "You are a quantum programming expert who converts Python/Qiskit code to Quell language.", prompt)
+			response, err := callClaude(apiKey, "You are a quantum programming expert who converts Qiskit, Cirq, Q#, Braket, and OpenQASM to Quell.", prompt)
 			if err != nil {
 				return err
 			}
@@ -147,7 +156,7 @@ Quell is an open-source, backend-agnostic quantum programming language built by 
 - Website: https://qubitlabs.magnobit.com
 - Repo: https://github.com/magnobit/quell
 - Simple one-gate-per-line syntax
-- Compiles to OpenQASM, Qiskit, Cirq, or Braket
+- Compiles to OpenQASM, Qiskit, Cirq, Braket, or Q#
 - Companies bring their own backend credentials via quell.config.yml or CLI flags
 
 You help users:

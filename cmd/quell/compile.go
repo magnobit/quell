@@ -18,9 +18,10 @@ func newCompileCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "compile <file.quell>",
-		Short: "Compile to OpenQASM, Qiskit, Cirq, or Braket",
+		Short: "Compile to OpenQASM, Qiskit, Cirq, Braket, or Q#",
 		Example: `  quell compile bell.quell
   quell compile --target qiskit bell.quell
+  quell compile --target qsharp bell.quell
   quell compile --target cirq --no-optimize -o out.py bell.quell`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -61,7 +62,7 @@ func newCompileCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&target, "target", string(compiler.TargetOpenQASM), "openqasm|qiskit|cirq|braket")
+	f.StringVar(&target, "target", string(compiler.TargetOpenQASM), "openqasm|openqasm2|qiskit|cirq|braket|qsharp")
 	f.StringVarP(&outFile, "output", "o", "", "write compiled output to file instead of stdout")
 	f.BoolVar(&optimize, "optimize", true, "enable the IR optimizer (default)")
 	f.BoolVar(&noOptimize, "no-optimize", false, "disable the IR optimizer")

@@ -19,11 +19,30 @@ type Instruction struct {
 	ArgNames   []string // parallel to Args; non-empty = unbound symbolic param
 	QubitNames []string
 	Line       int // source line number (1-indexed) for diagnostics
-	// Conditional (IF): when Gate=="IF", CondCbit/CondEq describe c[i]==v and
-	// Body holds the single gated instruction to apply when true.
-	CondCbit int
-	CondEq   int
-	Body     *Instruction
+	// Classical condition for IF / WHILE / ASSERT.
+	// CondRightBit < 0: c[CondCbit]==CondEq (or register c==CondEq when CondCbit < 0).
+	// CondRightBit >= 0: c[CondCbit]==c[CondRightBit].
+	CondCbit     int
+	CondEq       int
+	CondRightBit int // -1 = compare to CondEq
+	Body         *Instruction
+	ThenBody     []Instruction
+	ElseBody     []Instruction
+	// WHILE: Cond* + ThenBody; MaxIter caps iterations (required).
+	MaxIter int
+	// SWITCH: Cases arms; CondCbit selects the discriminant bit (or -1 for int(c)).
+	Cases []CaseArm
+	// MEASURE: optional classical targets parallel to Qubits (empty → c[q]=measure q).
+	MeasTargets []int
+	// PARAM type annotation (e.g. "angle"); empty = untyped.
+	ParamType string
+}
+
+// CaseArm is one SWITCH branch. Value is the match integer; Default marks DEFAULT.
+type CaseArm struct {
+	Value   int
+	Default bool
+	Body    []Instruction
 }
 
 // Circuit is the parsed representation of a .quell source file.
@@ -79,7 +98,7 @@ var gateArity = map[string]gateSpec{
 	"RESET":   {1, 0},
 }
 
-const validGateNames = "H X Y Z S T SDG TDG SX RX RY RZ P U CNOT CZ SWAP ISWAP CRX CRY CRZ CCX CSWAP MEASURE BARRIER RESET IF"
+const validGateNames = "H X Y Z S T SDG TDG SX RX RY RZ P U CNOT CZ SWAP ISWAP CRX CRY CRZ CCX CSWAP MEASURE BARRIER RESET IF FOR WHILE SWITCH PAR ASSERT"
 
 // simulatorMaxQubits is the maximum supported by the QubitLabs browser simulator.
 const simulatorMaxQubits = 12
@@ -87,7 +106,59 @@ const simulatorMaxQubits = 12
 // depthWarnThreshold is the circuit depth at which we warn about hardware decoherence.
 const depthWarnThreshold = 100
 
-var ifLineRe = regexp.MustCompile(`(?i)^IF\s+c\[(\d+)\]\s*==\s*(\d+)\s+(.+)$`)
+// Conditions: c[i]==v | c[i]==c[j] | c==v
+var (
+	condBitEqInt = regexp.MustCompile(`(?i)^c\[(\d+)\]\s*==\s*(\d+)$`)
+	condBitEqBit = regexp.MustCompile(`(?i)^c\[(\d+)\]\s*==\s*c\[(\d+)\]$`)
+	condRegEqInt = regexp.MustCompile(`(?i)^c\s*==\s*(\d+)$`)
+
+	condExpr = `(?:c\[\d+\]\s*==\s*(?:c\[\d+\]|\d+)|c\s*==\s*\d+)`
+
+	elseHeadRe    = regexp.MustCompile(`(?i)^ELSE\s*\{\s*(.*)$`)
+	forHeadRe     = regexp.MustCompile(`(?i)^FOR\s+(\w+)\s+IN\s+(\d+)\s*\.\.\s*(\d+)\s*\{\s*(.*)$`)
+	caseHeadRe    = regexp.MustCompile(`(?i)^CASE\s+(\d+)\s*:\s*(.*)$`)
+	defaultHeadRe = regexp.MustCompile(`(?i)^DEFAULT\s*:\s*(.*)$`)
+	parHeadRe     = regexp.MustCompile(`(?i)^PAR\s*\{\s*(.*)$`)
+	assertRe      = regexp.MustCompile(`(?i)^ASSERT\s+(.+)$`)
+	measArrowRe   = regexp.MustCompile(`(?i)^MEASURE\s+(.+?)\s*->\s*(.+)$`)
+	paramTypedRe  = regexp.MustCompile(`(?i)^PARAM\s+(\w+)\s*:\s*(\w+)\s*$`)
+)
+
+func init() {
+	ifLineRe = regexp.MustCompile(`(?i)^IF\s+(` + condExpr + `)\s+(.+)$`)
+	ifBlockHeadRe = regexp.MustCompile(`(?i)^IF\s+(` + condExpr + `)\s*\{\s*(.*)$`)
+	whileHeadRe = regexp.MustCompile(`(?i)^WHILE\s+(` + condExpr + `)\s+MAX\s+(\d+)\s*\{\s*(.*)$`)
+	switchHeadRe = regexp.MustCompile(`(?i)^SWITCH\s+(c(?:\[\d+\])?)\s*\{\s*(.*)$`)
+}
+
+var (
+	ifLineRe      *regexp.Regexp
+	ifBlockHeadRe *regexp.Regexp
+	whileHeadRe   *regexp.Regexp
+	switchHeadRe  *regexp.Regexp
+)
+
+// parseCond parses a classical condition expression.
+// Returns cbit (-1 = whole register c), eq, rightBit (-1 = int compare).
+func parseCond(expr string) (cbit, eq, rightBit int, err error) {
+	expr = strings.TrimSpace(expr)
+	rightBit = -1
+	if m := condBitEqBit.FindStringSubmatch(expr); m != nil {
+		a, _ := strconv.Atoi(m[1])
+		b, _ := strconv.Atoi(m[2])
+		return a, 0, b, nil
+	}
+	if m := condBitEqInt.FindStringSubmatch(expr); m != nil {
+		a, _ := strconv.Atoi(m[1])
+		v, _ := strconv.Atoi(m[2])
+		return a, v, -1, nil
+	}
+	if m := condRegEqInt.FindStringSubmatch(expr); m != nil {
+		v, _ := strconv.Atoi(m[1])
+		return -1, v, -1, nil
+	}
+	return 0, 0, -1, fmt.Errorf("invalid condition %q — use c[i]==v, c[i]==c[j], or c==v", expr)
+}
 
 // Parse parses Quell source code and returns a Circuit.
 //
@@ -112,12 +183,13 @@ func Parse(src string) (*Circuit, error) {
 	noisePhase := 0.0
 	noiseReadout := 0.0
 
-	scanner := bufio.NewScanner(strings.NewReader(src))
-	lineNum := 0
+	allLines := strings.Split(src, "\n")
+	i := 0
 
-	for scanner.Scan() {
-		lineNum++
-		raw := scanner.Text()
+	for i < len(allLines) {
+		lineNum := i + 1
+		raw := allLines[i]
+		i++
 		if ci := strings.Index(raw, "//"); ci >= 0 {
 			raw = raw[:ci]
 		}
@@ -156,7 +228,7 @@ func Parse(src string) (*Circuit, error) {
 
 		// gate name p0 p1 { … } — macro expanded at parse time
 		if keyword == "GATE" {
-			name, def, err := parseGateDef(tokens, line, scanner, &lineNum)
+			name, def, err := parseGateDefLines(tokens, line, allLines, &i, lineNum)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
@@ -167,8 +239,22 @@ func Parse(src string) (*Circuit, error) {
 			continue
 		}
 
-		// PARAM theta [, phi] — declare symbolic angles (optional; also inferred from use)
+		// PARAM theta [, phi]  or  PARAM theta : angle
 		if keyword == "PARAM" {
+			if m := paramTypedRe.FindStringSubmatch(line); m != nil {
+				name, typ := m[1], strings.ToLower(m[2])
+				if !isIdent(name) {
+					return nil, fmt.Errorf("line %d: invalid param name %q", lineNum, name)
+				}
+				switch typ {
+				case "angle", "float", "real":
+					// accepted type annotations (documentation / future binding)
+				default:
+					return nil, fmt.Errorf("line %d: unknown PARAM type %q (angle|float|real)", lineNum, m[2])
+				}
+				paramSet[name] = true
+				continue
+			}
 			for _, tok := range tokens[1:] {
 				name := strings.Trim(tok, ", \t")
 				if name == "" {
@@ -182,41 +268,281 @@ func Parse(src string) (*Circuit, error) {
 			continue
 		}
 
-		// IF c[i]==v GATE … — classical conditional (single body gate)
+		// FOR i IN 0..3 { … } — inclusive range, unrolled at parse time
+		if keyword == "FOR" {
+			m := forHeadRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: invalid FOR — use FOR i IN 0..3 { ... }", lineNum)
+			}
+			varName := m[1]
+			lo, _ := strconv.Atoi(m[2])
+			hi, _ := strconv.Atoi(m[3])
+			if hi < lo {
+				return nil, fmt.Errorf("line %d: FOR range %d..%d is empty/invalid", lineNum, lo, hi)
+			}
+			if hi-lo > 64 {
+				return nil, fmt.Errorf("line %d: FOR range too large (max 65 iterations)", lineNum)
+			}
+			bodyLines, err := readBraceBlockLines(allLines, &i, m[4])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: FOR: %w", lineNum, err)
+			}
+			for v := lo; v <= hi; v++ {
+				expanded := expandLoopVar(bodyLines, varName, v)
+				sub, err := Parse(expanded)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: FOR body (i=%d): %w", lineNum, v, err)
+				}
+				for _, inst := range sub.Instructions {
+					for _, q := range inst.Qubits {
+						if q > maxQubit {
+							maxQubit = q
+						}
+					}
+					trackIFQubits(&inst, &maxQubit, paramSet)
+					instructions = append(instructions, inst)
+				}
+			}
+			continue
+		}
+
+		// WHILE <cond> MAX n { … }
+		if keyword == "WHILE" {
+			m := whileHeadRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: invalid WHILE — use WHILE c[i]==v MAX n { ... }", lineNum)
+			}
+			cbit, eq, rightBit, err := parseCond(m[1])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: WHILE: %w", lineNum, err)
+			}
+			maxIt, _ := strconv.Atoi(m[2])
+			if maxIt < 1 || maxIt > 256 {
+				return nil, fmt.Errorf("line %d: WHILE MAX must be 1..256", lineNum)
+			}
+			bodyLines, err := readBraceBlockLines(allLines, &i, m[3])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: WHILE: %w", lineNum, err)
+			}
+			bodyCirc, err := Parse(strings.Join(bodyLines, "\n") + "\n")
+			if err != nil {
+				return nil, fmt.Errorf("line %d: WHILE body: %w", lineNum, err)
+			}
+			for _, inst := range bodyCirc.Instructions {
+				if inst.Gate == "WHILE" {
+					return nil, fmt.Errorf("line %d: nested WHILE not supported", lineNum)
+				}
+				trackIFQubits(&inst, &maxQubit, paramSet)
+			}
+			trackCondQubits(cbit, rightBit, &maxQubit)
+			instructions = append(instructions, Instruction{
+				Gate: "WHILE", CondCbit: cbit, CondEq: eq, CondRightBit: rightBit, MaxIter: maxIt,
+				ThenBody: bodyCirc.Instructions, Line: lineNum,
+			})
+			continue
+		}
+
+		// SWITCH c[i] | c { CASE n: … DEFAULT: … }
+		if keyword == "SWITCH" {
+			m := switchHeadRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: invalid SWITCH — use SWITCH c[i] { CASE 0: … DEFAULT: … }", lineNum)
+			}
+			disc := strings.TrimSpace(m[1])
+			cbit := -1
+			if strings.EqualFold(disc, "c") {
+				cbit = -1
+			} else if cm := regexp.MustCompile(`(?i)^c\[(\d+)\]$`).FindStringSubmatch(disc); cm != nil {
+				cbit, _ = strconv.Atoi(cm[1])
+			} else {
+				return nil, fmt.Errorf("line %d: SWITCH discriminant must be c or c[i]", lineNum)
+			}
+			bodyLines, err := readBraceBlockLines(allLines, &i, m[2])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: SWITCH: %w", lineNum, err)
+			}
+			cases, err := parseSwitchCases(bodyLines, lineNum, &maxQubit, paramSet)
+			if err != nil {
+				return nil, err
+			}
+			trackCondQubits(cbit, -1, &maxQubit)
+			instructions = append(instructions, Instruction{
+				Gate: "SWITCH", CondCbit: cbit, CondRightBit: -1, Cases: cases, Line: lineNum,
+			})
+			continue
+		}
+
+		// PAR { … } — commuting parallel layer (sim runs sequentially; depth = 1 layer)
+		if keyword == "PAR" {
+			m := parHeadRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: invalid PAR — use PAR { GATE …; … }", lineNum)
+			}
+			bodyLines, err := readBraceBlockLines(allLines, &i, m[1])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: PAR: %w", lineNum, err)
+			}
+			bodyCirc, err := Parse(strings.Join(bodyLines, "\n") + "\n")
+			if err != nil {
+				return nil, fmt.Errorf("line %d: PAR body: %w", lineNum, err)
+			}
+			seenQ := map[int]bool{}
+			for j := range bodyCirc.Instructions {
+				inst := &bodyCirc.Instructions[j]
+				switch inst.Gate {
+				case "IF", "WHILE", "SWITCH", "PAR", "MEASURE", "ASSERT":
+					return nil, fmt.Errorf("line %d: PAR body cannot contain %s", lineNum, inst.Gate)
+				}
+				for _, q := range inst.Qubits {
+					if seenQ[q] {
+						return nil, fmt.Errorf("line %d: PAR body has overlapping qubit %d — gates must be disjoint", lineNum, q)
+					}
+					seenQ[q] = true
+					if q > maxQubit {
+						maxQubit = q
+					}
+				}
+				trackIFQubits(inst, &maxQubit, paramSet)
+			}
+			instructions = append(instructions, Instruction{
+				Gate: "PAR", ThenBody: bodyCirc.Instructions, CondRightBit: -1, Line: lineNum,
+			})
+			continue
+		}
+
+		// ASSERT <cond> — local sim only
+		if keyword == "ASSERT" {
+			m := assertRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: invalid ASSERT — use ASSERT c[i]==v", lineNum)
+			}
+			cbit, eq, rightBit, err := parseCond(m[1])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: ASSERT: %w", lineNum, err)
+			}
+			trackCondQubits(cbit, rightBit, &maxQubit)
+			instructions = append(instructions, Instruction{
+				Gate: "ASSERT", CondCbit: cbit, CondEq: eq, CondRightBit: rightBit, Line: lineNum,
+			})
+			continue
+		}
+
+		// MEASURE q -> c[i]  (or MEASURE q0 q1 -> c[0] c[1])
+		if keyword == "MEASURE" {
+			if m := measArrowRe.FindStringSubmatch(line); m != nil {
+				leftCirc, err := Parse("MEASURE " + strings.TrimSpace(m[1]) + "\n")
+				if err != nil {
+					return nil, fmt.Errorf("line %d: MEASURE: %w", lineNum, err)
+				}
+				if len(leftCirc.Instructions) != 1 || leftCirc.Instructions[0].Gate != "MEASURE" {
+					return nil, fmt.Errorf("line %d: MEASURE left side must be qubit list", lineNum)
+				}
+				left := leftCirc.Instructions[0]
+				targets, err := parseMeasTargets(m[2], len(left.Qubits))
+				if err != nil {
+					return nil, fmt.Errorf("line %d: MEASURE: %w", lineNum, err)
+				}
+				for _, q := range left.Qubits {
+					if q > maxQubit {
+						maxQubit = q
+					}
+				}
+				for _, t := range targets {
+					if t > maxQubit {
+						maxQubit = t
+					}
+				}
+				instructions = append(instructions, Instruction{
+					Gate: "MEASURE", Qubits: left.Qubits, QubitNames: left.QubitNames,
+					MeasTargets: targets, CondRightBit: -1, Line: lineNum,
+				})
+				continue
+			}
+		}
+
+		// IF — block form or line form
 		if keyword == "IF" {
+			if m := ifBlockHeadRe.FindStringSubmatch(line); m != nil {
+				cbit, eq, rightBit, err := parseCond(m[1])
+				if err != nil {
+					return nil, fmt.Errorf("line %d: IF: %w", lineNum, err)
+				}
+				thenLines, err := readBraceBlockLines(allLines, &i, m[2])
+				if err != nil {
+					return nil, fmt.Errorf("line %d: IF: %w", lineNum, err)
+				}
+				thenCirc, err := Parse(strings.Join(thenLines, "\n") + "\n")
+				if err != nil {
+					return nil, fmt.Errorf("line %d: IF then-body: %w", lineNum, err)
+				}
+				for j := range thenCirc.Instructions {
+					if thenCirc.Instructions[j].Gate == "MEASURE" {
+						return nil, fmt.Errorf("line %d: IF body cannot contain MEASURE", lineNum)
+					}
+					trackIFQubits(&thenCirc.Instructions[j], &maxQubit, paramSet)
+				}
+				var elseBody []Instruction
+				for i < len(allLines) {
+					peek := strings.TrimSpace(allLines[i])
+					if ci := strings.Index(peek, "//"); ci >= 0 {
+						peek = strings.TrimSpace(peek[:ci])
+					}
+					if peek == "" {
+						i++
+						continue
+					}
+					if em := elseHeadRe.FindStringSubmatch(peek); em != nil {
+						i++
+						elseLines, err := readBraceBlockLines(allLines, &i, em[1])
+						if err != nil {
+							return nil, fmt.Errorf("line %d: ELSE: %w", lineNum, err)
+						}
+						elseCirc, err := Parse(strings.Join(elseLines, "\n") + "\n")
+						if err != nil {
+							return nil, fmt.Errorf("line %d: ELSE body: %w", lineNum, err)
+						}
+						for j := range elseCirc.Instructions {
+							if elseCirc.Instructions[j].Gate == "MEASURE" {
+								return nil, fmt.Errorf("line %d: ELSE body cannot contain MEASURE", lineNum)
+							}
+							trackIFQubits(&elseCirc.Instructions[j], &maxQubit, paramSet)
+						}
+						elseBody = elseCirc.Instructions
+					}
+					break
+				}
+				trackCondQubits(cbit, rightBit, &maxQubit)
+				instructions = append(instructions, Instruction{
+					Gate: "IF", CondCbit: cbit, CondEq: eq, CondRightBit: rightBit,
+					ThenBody: thenCirc.Instructions, ElseBody: elseBody, Line: lineNum,
+				})
+				continue
+			}
+
 			m := ifLineRe.FindStringSubmatch(line)
 			if m == nil {
-				return nil, fmt.Errorf("line %d: invalid IF — use IF c[i]==v GATE … (e.g. IF c[0]==1 X 1)", lineNum)
+				return nil, fmt.Errorf("line %d: invalid IF — use IF c[i]==v GATE or IF c[i]==v { ... }", lineNum)
 			}
-			cbit, _ := strconv.Atoi(m[1])
-			eq, _ := strconv.Atoi(m[2])
-			bodyCirc, err := Parse(m[3])
+			cbit, eq, rightBit, err := parseCond(m[1])
+			if err != nil {
+				return nil, fmt.Errorf("line %d: IF: %w", lineNum, err)
+			}
+			bodyCirc, err := Parse(m[2])
 			if err != nil {
 				return nil, fmt.Errorf("line %d: IF body: %w", lineNum, err)
 			}
 			if len(bodyCirc.Instructions) != 1 {
-				return nil, fmt.Errorf("line %d: IF body must be a single gate", lineNum)
+				return nil, fmt.Errorf("line %d: IF line-form body must be a single gate", lineNum)
 			}
 			body := bodyCirc.Instructions[0]
-			if body.Gate == "IF" || body.Gate == "MEASURE" {
-				return nil, fmt.Errorf("line %d: IF body cannot be IF or MEASURE", lineNum)
+			if body.Gate == "IF" || body.Gate == "MEASURE" || body.Gate == "WHILE" || body.Gate == "SWITCH" || body.Gate == "PAR" {
+				return nil, fmt.Errorf("line %d: IF body cannot be IF, WHILE, SWITCH, PAR, or MEASURE", lineNum)
 			}
-			for _, q := range body.Qubits {
-				if q > maxQubit {
-					maxQubit = q
-				}
-			}
-			for _, name := range body.ArgNames {
-				if name != "" {
-					paramSet[name] = true
-				}
-			}
-			if cbit > maxQubit {
-				maxQubit = cbit
-			}
+			trackIFQubits(&body, &maxQubit, paramSet)
+			trackCondQubits(cbit, rightBit, &maxQubit)
 			bodyCopy := body
 			instructions = append(instructions, Instruction{
-				Gate: "IF", CondCbit: cbit, CondEq: eq, Body: &bodyCopy, Line: lineNum,
+				Gate: "IF", CondCbit: cbit, CondEq: eq, CondRightBit: rightBit, Body: &bodyCopy, Line: lineNum,
 			})
 			continue
 		}
@@ -691,3 +1017,246 @@ func isGateName(s string) bool {
 	_, ok := gateArity[strings.ToUpper(s)]
 	return ok
 }
+
+func trackIFQubits(inst *Instruction, maxQubit *int, paramSet map[string]bool) {
+	for _, q := range inst.Qubits {
+		if q > *maxQubit {
+			*maxQubit = q
+		}
+	}
+	for _, t := range inst.MeasTargets {
+		if t > *maxQubit {
+			*maxQubit = t
+		}
+	}
+	for _, name := range inst.ArgNames {
+		if name != "" {
+			paramSet[name] = true
+		}
+	}
+	if inst.Body != nil {
+		trackIFQubits(inst.Body, maxQubit, paramSet)
+	}
+	for i := range inst.ThenBody {
+		trackIFQubits(&inst.ThenBody[i], maxQubit, paramSet)
+	}
+	for i := range inst.ElseBody {
+		trackIFQubits(&inst.ElseBody[i], maxQubit, paramSet)
+	}
+	for _, arm := range inst.Cases {
+		for i := range arm.Body {
+			trackIFQubits(&arm.Body[i], maxQubit, paramSet)
+		}
+	}
+	trackCondQubits(inst.CondCbit, inst.CondRightBit, maxQubit)
+}
+
+func trackCondQubits(cbit, rightBit int, maxQubit *int) {
+	if cbit > *maxQubit {
+		*maxQubit = cbit
+	}
+	if rightBit > *maxQubit {
+		*maxQubit = rightBit
+	}
+}
+
+var cbitTargetRe = regexp.MustCompile(`(?i)^c\[(\d+)\]$`)
+
+func parseMeasTargets(s string, nQ int) ([]int, error) {
+	toks := strings.Fields(strings.ReplaceAll(s, ",", " "))
+	if nQ == 0 {
+		return nil, fmt.Errorf("MEASURE … -> … requires explicit qubit list on the left")
+	}
+	if len(toks) != nQ {
+		return nil, fmt.Errorf("target count %d != qubit count %d", len(toks), nQ)
+	}
+	out := make([]int, nQ)
+	for i, tok := range toks {
+		if m := cbitTargetRe.FindStringSubmatch(tok); m != nil {
+			out[i], _ = strconv.Atoi(m[1])
+			continue
+		}
+		if n, err := strconv.Atoi(tok); err == nil && n >= 0 {
+			out[i] = n
+			continue
+		}
+		return nil, fmt.Errorf("invalid measure target %q (use c[i] or integer bit index)", tok)
+	}
+	return out, nil
+}
+
+func parseSwitchCases(bodyLines []string, lineNum int, maxQubit *int, paramSet map[string]bool) ([]CaseArm, error) {
+	var cases []CaseArm
+	var cur *CaseArm
+	var bodyAcc []string
+	flush := func() error {
+		if cur == nil {
+			return nil
+		}
+		src := strings.Join(bodyAcc, "\n")
+		if strings.TrimSpace(src) != "" {
+			circ, err := Parse(src + "\n")
+			if err != nil {
+				return fmt.Errorf("line %d: SWITCH case body: %w", lineNum, err)
+			}
+			for j := range circ.Instructions {
+				g := circ.Instructions[j].Gate
+				if g == "MEASURE" || g == "SWITCH" {
+					return fmt.Errorf("line %d: SWITCH case cannot contain %s", lineNum, g)
+				}
+				trackIFQubits(&circ.Instructions[j], maxQubit, paramSet)
+			}
+			cur.Body = circ.Instructions
+		}
+		cases = append(cases, *cur)
+		cur = nil
+		bodyAcc = nil
+		return nil
+	}
+	for _, raw := range bodyLines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if m := caseHeadRe.FindStringSubmatch(line); m != nil {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			v, _ := strconv.Atoi(m[1])
+			cur = &CaseArm{Value: v}
+			if rest := strings.TrimSpace(m[2]); rest != "" {
+				bodyAcc = append(bodyAcc, rest)
+			}
+			continue
+		}
+		if m := defaultHeadRe.FindStringSubmatch(line); m != nil {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			cur = &CaseArm{Default: true}
+			if rest := strings.TrimSpace(m[1]); rest != "" {
+				bodyAcc = append(bodyAcc, rest)
+			}
+			continue
+		}
+		if cur == nil {
+			return nil, fmt.Errorf("line %d: SWITCH body must start with CASE or DEFAULT", lineNum)
+		}
+		bodyAcc = append(bodyAcc, line)
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	if len(cases) == 0 {
+		return nil, fmt.Errorf("line %d: SWITCH has no CASE arms", lineNum)
+	}
+	return cases, nil
+}
+
+// readBraceBlockLines collects lines until the matching closing }.
+// firstInner is text after "{" on the opening line. *idx is the next line to read.
+func readBraceBlockLines(lines []string, idx *int, firstInner string) ([]string, error) {
+	var buf []string
+	depth := 1
+	firstInner = strings.TrimSpace(firstInner)
+	if firstInner != "" {
+		if strings.HasSuffix(firstInner, "}") && !strings.Contains(strings.TrimSuffix(firstInner, "}"), "{") {
+			inner := strings.TrimSpace(strings.TrimSuffix(firstInner, "}"))
+			if inner != "" {
+				buf = append(buf, strings.TrimSuffix(inner, ";"))
+			}
+			return buf, nil
+		}
+		// count braces on first remainder
+		for _, r := range firstInner {
+			if r == '{' {
+				depth++
+			} else if r == '}' {
+				depth--
+			}
+		}
+		if depth == 0 {
+			inner := firstInner
+			if j := strings.LastIndex(inner, "}"); j >= 0 {
+				inner = inner[:j]
+			}
+			inner = strings.TrimSpace(inner)
+			if inner != "" {
+				buf = append(buf, strings.TrimSuffix(inner, ";"))
+			}
+			return buf, nil
+		}
+		buf = append(buf, strings.TrimSuffix(firstInner, ";"))
+	}
+	for *idx < len(lines) {
+		raw := lines[*idx]
+		*idx++
+		if ci := strings.Index(raw, "//"); ci >= 0 {
+			raw = raw[:ci]
+		}
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		for _, r := range s {
+			if r == '{' {
+				depth++
+			} else if r == '}' {
+				depth--
+			}
+		}
+		if depth == 0 {
+			if strings.HasPrefix(s, "}") {
+				rem := strings.TrimSpace(strings.TrimPrefix(s, "}"))
+				if rem != "" {
+					// put remainder back
+					*idx = *idx - 1
+					lines[*idx] = rem
+				}
+				return buf, nil
+			}
+			// } at end of line with content before
+			if j := strings.LastIndex(s, "}"); j >= 0 {
+				before := strings.TrimSpace(s[:j])
+				if before != "" {
+					buf = append(buf, strings.TrimSuffix(before, ";"))
+				}
+			}
+			return buf, nil
+		}
+		buf = append(buf, strings.TrimSuffix(s, ";"))
+	}
+	return nil, fmt.Errorf("unclosed {")
+}
+
+func expandLoopVar(bodyLines []string, varName string, val int) string {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(varName) + `\b`)
+	repl := strconv.Itoa(val)
+	var b strings.Builder
+	for _, line := range bodyLines {
+		b.WriteString(re.ReplaceAllString(line, repl))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// parseGateDefLines is parseGateDef for the line-index based Parse loop.
+func parseGateDefLines(tokens []string, line string, lines []string, idx *int, lineNum int) (string, gateDef, error) {
+	// Reuse scanner-based logic by synthesizing a reader from remaining lines.
+	rest := strings.Join(lines[*idx:], "\n")
+	full := line + "\n" + rest
+	sc := bufio.NewScanner(strings.NewReader(full))
+	ln := lineNum
+	if !sc.Scan() {
+		return "", gateDef{}, fmt.Errorf("empty gate")
+	}
+	name, def, err := parseGateDef(tokens, sc.Text(), sc, &ln)
+	if err != nil {
+		return "", gateDef{}, err
+	}
+	// Advance idx by how many extra lines were consumed (ln - lineNum)
+	consumed := ln - lineNum
+	*idx += consumed
+	return name, def, nil
+}
+

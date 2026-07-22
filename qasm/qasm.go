@@ -1,11 +1,16 @@
-// Copyright 2026 Magnobit, Inc. All rights reserved.
-
-// Package qasm is the public OpenQASM → Quell import API (thin subset).
 package qasm
 
 import "github.com/magnobit/quell/internal/qasmimport"
 
-// ToQuell converts a subset of OpenQASM 3 into Quell source.
+// Result is a Quell conversion with soft warnings for skipped/unsupported lines.
+type Result = qasmimport.Result
+
+// ToQuell converts a subset of OpenQASM 2/3 into Quell source.
 func ToQuell(src string) (string, error) {
 	return qasmimport.ToQuell(src)
+}
+
+// Convert is ToQuell plus structured warnings (unsupported / skipped lines).
+func Convert(src string) (Result, error) {
+	return qasmimport.Convert(src)
 }

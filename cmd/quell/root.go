@@ -9,20 +9,28 @@ import (
 	"strings"
 
 	"github.com/magnobit/quell/internal/config"
+	"github.com/magnobit/quell/log"
 	"github.com/spf13/cobra"
 )
 
-const version = "0.0.2"
+const version = "0.0.9"
 
 func newRootCmd() *cobra.Command {
+	var logLevel string
 	root := &cobra.Command{
 		Use:          "quell",
 		Short:        "Quell — backend-agnostic quantum circuit language",
 		Long:         "Quell is an open-source, backend-agnostic quantum circuit language.\nWrite once, run on IBM Quantum, AWS Braket, Google Quantum Engine, IonQ, Rigetti, or Azure Quantum.",
 		Version:      version,
 		SilenceUsage: true,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			if logLevel != "" {
+				log.SetLevel(logLevel)
+			}
+		},
 	}
 	root.SetVersionTemplate("quell {{.Version}}\n")
+	root.PersistentFlags().StringVar(&logLevel, "log-level", os.Getenv("QUELL_LOG_LEVEL"), "log level: debug|info|warn|error (env QUELL_LOG_LEVEL)")
 
 	root.AddCommand(newRunCmd())
 	root.AddCommand(newAnnealCmd())
@@ -80,6 +88,8 @@ func must(err error, msg string) {
 }
 
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "quell: "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	log.Error(msg)
+	fmt.Fprintf(os.Stderr, "quell: %s\n", msg)
 	os.Exit(1)
 }
