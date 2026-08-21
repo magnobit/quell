@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -50,8 +51,10 @@ type Circuit struct {
 	Instructions []Instruction
 	NumQubits    int
 	QubitNames   map[string]int
-	Params       []string // unbound symbolic angle names declared/used
-	Warnings     []string // non-fatal issues that compile fine but likely indicate mistakes
+	QubitDecls   []QubitDecl // named qubit declarations, in source order — see Macro's doc comment for why this exists alongside QubitNames
+	Params       []string    // unbound symbolic angle names declared/used
+	Warnings     []string    // non-fatal issues that compile fine but likely indicate mistakes
+	Macros       []Macro     // user-defined gate macros declared in this file, in source order
 	// Local-sim noise (from NOISE directives). Compile targets ignore these.
 	NoiseDepolarizing     float64
 	NoiseAmplitudeDamping float64
@@ -59,17 +62,41 @@ type Circuit struct {
 	NoiseReadout          float64
 }
 
+// Macro describes one `gate NAME p0 p1 { ... }` macro declared in the
+// source, for tooling (hover, completion, go-to-definition) that needs to
+// resolve a macro invocation back to where it was defined. Macros are
+// expanded away during Parse — Instructions never contains the invocation
+// in its original form — so this is the only place that information survives.
+type Macro struct {
+	Name   string
+	Params []string
+	Line   int // 1-indexed source line of the "gate NAME ... {" header
+}
+
+// QubitDecl is one named qubit declared via a "qubit name1, name2" line, for
+// the same reason Macro exists: QubitNames alone (name -> index) has no
+// line number, and tooling needs one for hover/go-to-definition/rename.
+type QubitDecl struct {
+	Name string
+	Line int // 1-indexed source line of its "qubit ..." declaration
+}
+
 // gateDef is a user-defined macro expanded at parse time (not a runtime call).
 type gateDef struct {
 	params []string
 	body   []string // one Quell statement per entry
+	line   int      // 1-indexed source line of the "gate NAME ... {" header
 }
 
-// gateSpec encodes the expected qubit and float-argument count per gate.
-// qubits == -1 means variadic (MEASURE and BARRIER accept 0 or more qubits).
-type gateSpec struct{ qubits, args int }
+// GateSpec encodes the expected qubit and float-argument count per gate.
+// Qubits == -1 means variadic (MEASURE and BARRIER accept 0 or more qubits).
+// Exported for tooling (e.g. the LSP's hover/completion) that needs the same
+// canonical gate list the parser itself validates against.
+type GateSpec struct{ Qubits, Args int }
 
-var gateArity = map[string]gateSpec{
+// GateArity is the canonical table of built-in gates and their arity — the
+// single source of truth also used by Parse's own validation below.
+var GateArity = map[string]GateSpec{
 	"H":       {1, 0},
 	"X":       {1, 0},
 	"Y":       {1, 0},
@@ -175,6 +202,7 @@ func Parse(src string) (*Circuit, error) {
 	var instructions []Instruction
 	maxQubit := -1
 	namedQubits := map[string]int{}
+	var qubitDecls []QubitDecl // source order — a map here would lose ordering among names declared on the same line
 	nextNamedIdx := 0
 	paramSet := map[string]bool{}
 	gateDefs := map[string]gateDef{}
@@ -232,7 +260,7 @@ func Parse(src string) (*Circuit, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
-			if _, builtin := gateArity[name]; builtin {
+			if _, builtin := GateArity[name]; builtin {
 				return nil, fmt.Errorf("line %d: cannot redefine built-in gate %s", lineNum, name)
 			}
 			gateDefs[name] = def
@@ -556,6 +584,7 @@ func Parse(src string) (*Circuit, error) {
 				}
 				if _, exists := namedQubits[name]; !exists {
 					namedQubits[name] = nextNamedIdx
+					qubitDecls = append(qubitDecls, QubitDecl{Name: name, Line: lineNum})
 					if nextNamedIdx > maxQubit {
 						maxQubit = nextNamedIdx
 					}
@@ -607,7 +636,7 @@ func Parse(src string) (*Circuit, error) {
 			continue
 		}
 
-		spec, known := gateArity[gate]
+		spec, known := GateArity[gate]
 		if !known {
 			return nil, fmt.Errorf("line %d: unknown gate %q (valid gates: %s)", lineNum, gate, validGateNames)
 		}
@@ -634,7 +663,7 @@ func Parse(src string) (*Circuit, error) {
 			}
 
 			// If gate expects more angle args, consume as angle or symbolic param.
-			if spec.args > 0 && len(args) < spec.args {
+			if spec.Args > 0 && len(args) < spec.Args {
 				if f, ok := evalAngle(tok); ok {
 					args = append(args, f)
 					argNames = append(argNames, "")
@@ -672,15 +701,15 @@ func Parse(src string) (*Circuit, error) {
 		}
 
 		// Validate qubit count
-		if spec.qubits >= 0 && len(qubits) != spec.qubits {
-			return nil, fmt.Errorf("line %d: %s requires %d qubit(s), got %d", lineNum, gate, spec.qubits, len(qubits))
+		if spec.Qubits >= 0 && len(qubits) != spec.Qubits {
+			return nil, fmt.Errorf("line %d: %s requires %d qubit(s), got %d", lineNum, gate, spec.Qubits, len(qubits))
 		}
 		// Validate angle arg count
-		if len(args) != spec.args {
-			return nil, fmt.Errorf("line %d: %s requires %d angle argument(s), got %d — use float, PI notation, or a param name (e.g. theta)", lineNum, gate, spec.args, len(args))
+		if len(args) != spec.Args {
+			return nil, fmt.Errorf("line %d: %s requires %d angle argument(s), got %d — use float, PI notation, or a param name (e.g. theta)", lineNum, gate, spec.Args, len(args))
 		}
 		// Validate no duplicate qubits on multi-qubit gates (CNOT 0 0 is invalid)
-		if spec.qubits >= 2 {
+		if spec.Qubits >= 2 {
 			seen := map[int]bool{}
 			for _, q := range qubits {
 				if seen[q] {
@@ -716,12 +745,20 @@ func Parse(src string) (*Circuit, error) {
 		params = append(params, name)
 	}
 
+	macros := make([]Macro, 0, len(gateDefs))
+	for name, def := range gateDefs {
+		macros = append(macros, Macro{Name: name, Params: append([]string(nil), def.params...), Line: def.line})
+	}
+	sort.Slice(macros, func(i, j int) bool { return macros[i].Line < macros[j].Line })
+
 	return &Circuit{
 		Instructions:          instructions,
 		NumQubits:             nq,
 		QubitNames:            namedQubits,
+		QubitDecls:            qubitDecls,
 		Params:                params,
 		Warnings:              warnings,
+		Macros:                macros,
 		NoiseDepolarizing:     noiseDep,
 		NoiseAmplitudeDamping: noiseAmp,
 		NoisePhaseDamping:     noisePhase,
@@ -1014,7 +1051,7 @@ func isIdent(s string) bool {
 }
 
 func isGateName(s string) bool {
-	_, ok := gateArity[strings.ToUpper(s)]
+	_, ok := GateArity[strings.ToUpper(s)]
 	return ok
 }
 
@@ -1254,9 +1291,9 @@ func parseGateDefLines(tokens []string, line string, lines []string, idx *int, l
 	if err != nil {
 		return "", gateDef{}, err
 	}
+	def.line = lineNum
 	// Advance idx by how many extra lines were consumed (ln - lineNum)
 	consumed := ln - lineNum
 	*idx += consumed
 	return name, def, nil
 }
-

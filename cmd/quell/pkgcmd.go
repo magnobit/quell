@@ -18,15 +18,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// registryBase is kept as a thin alias so existing call sites in this file
+// don't all need touching — the actual env-var lookup lives in pkgmgr now,
+// shared with GetOne's registry fetch path, instead of two copies that
+// could disagree about the default URL or the QUELL_REGISTRY_URL name.
+func registryBase() string { return pkgmgr.RegistryBase() }
+
 func newPkgCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pkg",
 		Short: "Manage Quell packages (quell.pkg.yml)",
 		Long: `Manage Quell packages (quell.pkg.yml)
 
-A package can be a git repository (source: github.com/…) or a hosted registry
-package (quell pkg install name@version). Installed packages live in
-.quell/pkg/<source>/ under your project root.`,
+A package can be a git repository (source: github.com/…), fetched into
+.quell/pkg/<source>/, or a hosted registry package (quell pkg install
+name@version), fetched into .quell/pkg/registry/<name>/<version>/ and
+recorded in quell.pkg.yml so a fresh 'quell pkg get' reproduces it too.`,
 	}
 	cmd.AddCommand(newPkgAddCmd())
 	cmd.AddCommand(newPkgGetCmd())
@@ -120,17 +127,10 @@ func pkgRoot() string {
 	return wd
 }
 
-func registryBase() string {
-	if u := os.Getenv("QUELL_REGISTRY_URL"); u != "" {
-		return strings.TrimRight(u, "/")
-	}
-	return "http://localhost:8085/api/v1"
-}
-
 func newPkgInstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "install <name>@<version>",
-		Short:   "Install a package from the hosted Quell registry",
+		Short:   "Install a package from the hosted Quell registry, and record it in quell.pkg.yml",
 		Example: "  quell pkg install grover@1.0.0\n  QUELL_REGISTRY_URL=http://localhost:8085/api/v1 quell pkg install chemistry@0.1.0",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -140,48 +140,14 @@ func newPkgInstallCmd() *cobra.Command {
 				return fmt.Errorf("expected name@version, got %q", spec)
 			}
 			root := pkgRoot()
-			url := fmt.Sprintf("%s/packages/%s/%s/download", registryBase(), name, ver)
-			resp, err := http.Get(url)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != 200 {
-				body, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("registry %s: %s", resp.Status, strings.TrimSpace(string(body)))
+			// AddRequirement both fetches it now and records "registry/<name>"
+			// @ ver in quell.pkg.yml — so a fresh `quell pkg get` on another
+			// machine (or after a clean .quell/pkg/) reproduces it, instead of
+			// this install being a one-off that only this machine remembers.
+			if _, err := pkgmgr.AddRequirement(root, "registry/"+name, ver); err != nil {
+				return fmt.Errorf("install %s@%s: %w", name, ver, err)
 			}
 			dest := filepath.Join(root, ".quell", "pkg", "registry", name, ver)
-			if err := os.MkdirAll(dest, 0755); err != nil {
-				return err
-			}
-			gz, err := gzip.NewReader(resp.Body)
-			if err != nil {
-				return fmt.Errorf("not a gzip tarball: %w", err)
-			}
-			defer gz.Close()
-			tr := tar.NewReader(gz)
-			for {
-				hdr, err := tr.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					return err
-				}
-				if hdr.Typeflag != tar.TypeReg {
-					continue
-				}
-				outPath := filepath.Join(dest, filepath.Base(hdr.Name))
-				f, err := os.Create(outPath)
-				if err != nil {
-					return err
-				}
-				if _, err := io.Copy(f, tr); err != nil {
-					f.Close()
-					return err
-				}
-				f.Close()
-			}
 			fmt.Printf("Installed registry/%s@%s → %s\n", name, ver, dest)
 			return nil
 		},
@@ -191,10 +157,10 @@ func newPkgInstallCmd() *cobra.Command {
 func newPkgPublishCmd() *cobra.Command {
 	var version, desc, token string
 	cmd := &cobra.Command{
-		Use:   "publish <name> <dir>",
-		Short: "Publish a directory of .quell files to the hosted registry",
+		Use:     "publish <name> <dir>",
+		Short:   "Publish a directory of .quell files to the hosted registry",
 		Example: "  quell pkg publish grover ./examples/grover --version 1.0.0\n  QUELL_AUTH_TOKEN=… quell pkg publish chemistry ./lib --version 0.1.0",
-		Args:  cobra.ExactArgs(2),
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, dir := args[0], args[1]
 			if version == "" {

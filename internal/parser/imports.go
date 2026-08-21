@@ -32,7 +32,7 @@ import (
 // the simplest, most literal "paste this text here" behavior, with only
 // true cycles (a file importing itself, directly or transitively) rejected.
 func ParseFile(path string) (*Circuit, error) {
-	root := findProjectRoot(filepath.Dir(path))
+	root := FindProjectRoot(filepath.Dir(path))
 	expanded, err := resolveImports(path, root, nil, 0)
 	if err != nil {
 		return nil, err
@@ -42,7 +42,10 @@ func ParseFile(path string) (*Circuit, error) {
 
 const maxImportDepth = 64
 
-var importLineRe = regexp.MustCompile(`^import\s+"([^"]+)"\s*$`)
+// ImportLineRe matches a Quell "import "path"" line — exported so tooling
+// (the LSP's go-to-definition) can recognize the same import syntax the
+// parser itself resolves, instead of re-deriving the pattern.
+var ImportLineRe = regexp.MustCompile(`^import\s+"([^"]+)"\s*$`)
 
 func resolveImports(path, projectRoot string, ancestors []string, depth int) (string, error) {
 	if depth > maxImportDepth {
@@ -75,8 +78,8 @@ func resolveImports(path, projectRoot string, ancestors []string, depth int) (st
 		raw := scanner.Text()
 		trimmed := strings.TrimSpace(raw)
 
-		if m := importLineRe.FindStringSubmatch(trimmed); m != nil {
-			importPath, err := resolveImportPath(m[1], dir, projectRoot)
+		if m := ImportLineRe.FindStringSubmatch(trimmed); m != nil {
+			importPath, err := ResolveImportPath(m[1], dir, projectRoot)
 			if err != nil {
 				return "", fmt.Errorf("%s:%d: %w", path, lineNum, err)
 			}
@@ -95,7 +98,12 @@ func resolveImports(path, projectRoot string, ancestors []string, depth int) (st
 	return out.String(), nil
 }
 
-func resolveImportPath(spec, currentDir, projectRoot string) (string, error) {
+// ResolveImportPath resolves one import spec (the quoted string in an
+// `import "..."` line) to an absolute filesystem path, using the same
+// relative-vs-package rules ParseFile itself uses — exported so the LSP can
+// resolve go-to-definition for an import line the same way the compiler
+// would resolve it at parse time.
+func ResolveImportPath(spec, currentDir, projectRoot string) (string, error) {
 	if strings.HasPrefix(spec, ".") {
 		return filepath.Join(currentDir, spec), nil
 	}
@@ -122,10 +130,11 @@ func normalizePackageSpec(spec string) string {
 	return clean
 }
 
-// findProjectRoot walks up from dir looking for quell.pkg.yml, returning
+// FindProjectRoot walks up from dir looking for quell.pkg.yml, returning
 // the directory that contains it, or "" if none is found (package imports
 // will then fail with a clear error; relative imports still work fine).
-func findProjectRoot(dir string) string {
+// Exported for the same reason as ResolveImportPath above.
+func FindProjectRoot(dir string) string {
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "quell.pkg.yml")); err == nil {
 			return dir

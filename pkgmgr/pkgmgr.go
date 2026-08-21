@@ -1,20 +1,35 @@
 // Copyright 2026 Magnobit, Inc. All rights reserved.
 
-// Package pkgmgr is Quell's package manager v1: it fetches git repositories
-// referenced by a project's quell.pkg.yml into .quell/pkg/<source>/, where
-// the import resolver (see internal/parser's ParseFile) can find them.
+// Package pkgmgr is Quell's package manager: it fetches packages referenced
+// by a project's quell.pkg.yml into .quell/pkg/, where the import resolver
+// (see internal/parser's ParseFile) can find them. Two source kinds are
+// requirements, resolved uniformly by Get/GetOne:
 //
-// There is no hosted registry — a "package" is just a git repo, addressed
-// by its clone URL (e.g. "github.com/someuser/quell-gates"), the same
-// bring-your-own-VCS model Go itself used for dependencies before GOPROXY
-// existed. That's a deliberate v1 choice, not a placeholder for a registry
-// that's coming later in this same change: standing up a hosted package
-// index/registry service is a real, separate infrastructure project.
+//   - A git repository, addressed by its clone URL with no scheme
+//     (e.g. "github.com/someuser/quell-gates") — the same bring-your-own-VCS
+//     model Go itself used for dependencies before GOPROXY existed. Fetched
+//     into .quell/pkg/<source>/.
+//   - A hosted-registry package, addressed as "registry/<name>" with Version
+//     set — QubitLabs's own package registry (see the qubitlabs-platform
+//     repo's internal/packages and RegistryBase below), a real publish/
+//     download service, not a placeholder. Fetched into
+//     .quell/pkg/registry/<name>/<version>/ — the same layout `quell pkg
+//     install` (cmd/quell/pkgcmd.go) already produced before this file
+//     started tracking it in the manifest too; install now also calls
+//     AddRequirement so a fresh `quell pkg get` reproduces it.
+//
+// There is still no *discovery* UI (browsing what's published) — only the
+// CLI (`quell pkg install`, `quell pkg publish`) and the registry's raw API
+// talk to it today.
 package pkgmgr
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,7 +128,7 @@ func AddRequirement(projectRoot, source, version string) (*Manifest, error) {
 	return m, nil
 }
 
-// Get fetches every requirement in m into <projectRoot>/.quell/pkg/<source>/.
+// Get fetches every requirement in m — see GetOne for where each kind lands.
 func Get(projectRoot string, m *Manifest) error {
 	for _, req := range m.Require {
 		if err := GetOne(projectRoot, req); err != nil {
@@ -123,19 +138,107 @@ func Get(projectRoot string, m *Manifest) error {
 	return nil
 }
 
-// GetOne fetches a single requirement: a fresh git clone if it's not
-// already present under .quell/pkg/, otherwise a fetch + checkout to
-// (re)pin it to req.Version.
+const registrySourcePrefix = "registry/"
+
+// GetOne fetches a single requirement.
+//   - registry/<name> (Version required): downloads the published tarball
+//     from the hosted registry into .quell/pkg/registry/<name>/<version>/.
+//     Already present at that exact version → no-op (registry packages are
+//     immutable per version, unlike a git branch/tag that can move; there's
+//     nothing to "update" without a version bump, which is just a new
+//     requirement version, handled the normal way).
+//   - anything else: a fresh git clone if not already present under
+//     .quell/pkg/, otherwise a fetch + checkout to (re)pin it to req.Version.
 func GetOne(projectRoot string, req Requirement) error {
 	if req.Source == "" {
 		return fmt.Errorf("requirement has no source")
 	}
-	dest := destPath(projectRoot, req.Source)
 
+	if name, ok := strings.CutPrefix(req.Source, registrySourcePrefix); ok {
+		if req.Version == "" {
+			return fmt.Errorf("registry package %q requires a version", name)
+		}
+		dest := registryDestPath(projectRoot, name, req.Version)
+		if _, err := os.Stat(dest); err == nil {
+			return nil // already fetched at this exact version
+		}
+		return fetchRegistryPackage(dest, name, req.Version)
+	}
+
+	dest := destPath(projectRoot, req.Source)
 	if _, err := os.Stat(filepath.Join(dest, ".git")); err == nil {
 		return updatePackage(dest, req.Version)
 	}
 	return clonePackage(req.Source, dest, req.Version)
+}
+
+// registryDestPath matches the layout cmd/quell/pkgcmd.go's install command
+// already wrote to before requirements were tracked in the manifest —
+// changing it would silently orphan every package a user installed with an
+// older CLI build.
+func registryDestPath(projectRoot, name, version string) string {
+	return filepath.Join(projectRoot, ".quell", "pkg", "registry", name, version)
+}
+
+// RegistryBase returns the hosted-registry API base URL: QUELL_REGISTRY_URL
+// if set, otherwise the local dev API. Exported so cmd/quell can share this
+// one definition instead of keeping its own copy in sync.
+func RegistryBase() string {
+	if u := os.Getenv("QUELL_REGISTRY_URL"); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return "http://localhost:8085/api/v1"
+}
+
+// fetchRegistryPackage downloads name@version's tarball from the hosted
+// registry and extracts its .quell files into dest.
+func fetchRegistryPackage(dest, name, version string) error {
+	url := fmt.Sprintf("%s/packages/%s/%s/download", RegistryBase(), name, version)
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("registry fetch %s@%s: %w", name, version, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("registry fetch %s@%s: %s: %s", name, version, resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("registry package %s@%s: not a gzip tarball: %w", name, version, err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		// filepath.Base strips any directory components a malicious or
+		// malformed tarball entry might carry (e.g. "../../etc/passwd") —
+		// every file lands flat in dest regardless of what the entry claims.
+		outPath := filepath.Join(dest, filepath.Base(hdr.Name))
+		f, err := os.Create(outPath)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(f, tr); err != nil {
+			f.Close()
+			return err
+		}
+		f.Close()
+	}
+	return nil
 }
 
 // destPath is the local cache directory for source, under

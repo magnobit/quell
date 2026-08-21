@@ -6,12 +6,14 @@
 // thin client extension, Neovim's built-in LSP client, or Helix, can use
 // this directly by pointing it at `quell lsp`).
 //
-// v1 scope is deliberately bounded to the two capabilities that come
-// almost for free from existing infrastructure and give the most
-// real-editor value: diagnostics (parser.Parse's existing line-numbered
-// errors and Circuit.Warnings, surfaced as red squiggles) and
-// documentFormatting (the format package, surfaced as format-on-save).
-// Hover/completion/go-to-definition are natural next steps, not built here.
+// Capabilities: diagnostics (parser.Parse's line-numbered errors and
+// Circuit.Warnings, surfaced as red squiggles), documentFormatting (the
+// format package, surfaced as format-on-save), hover and completion for
+// built-in gates/keywords and user-defined gate macros (see gates.go and
+// features.go), go-to-definition for macro invocations and import lines,
+// and rename — deliberately scoped to macro names only, see the doc
+// comment on rename in features.go for why anything broader isn't safe
+// without cross-file/import-splice awareness this server doesn't have yet.
 package lsp
 
 import (
@@ -79,8 +81,12 @@ func (s *server) loop(r io.Reader) error {
 				"capabilities": map[string]any{
 					"textDocumentSync":           1, // full document sync
 					"documentFormattingProvider": true,
+					"hoverProvider":              true,
+					"definitionProvider":         true,
+					"renameProvider":             true,
+					"completionProvider":         map[string]any{"triggerCharacters": []string{}},
 				},
-				"serverInfo": map[string]any{"name": "quell-lsp", "version": "0.1.0"},
+				"serverInfo": map[string]any{"name": "quell-lsp", "version": "0.2.0"},
 			})
 		case "initialized":
 			// no-op notification
@@ -125,6 +131,22 @@ func (s *server) loop(r io.Reader) error {
 				Range:   fullRange(text),
 				NewText: formatted,
 			}})
+		case "textDocument/hover":
+			var p textDocumentPositionParams
+			json.Unmarshal(msg.Params, &p)
+			s.hover(msg.ID, p.TextDocument.URI, p.Position)
+		case "textDocument/completion":
+			var p textDocumentPositionParams
+			json.Unmarshal(msg.Params, &p)
+			s.completion(msg.ID, p.TextDocument.URI)
+		case "textDocument/definition":
+			var p textDocumentPositionParams
+			json.Unmarshal(msg.Params, &p)
+			s.definition(msg.ID, p.TextDocument.URI, p.Position)
+		case "textDocument/rename":
+			var p renameParams
+			json.Unmarshal(msg.Params, &p)
+			s.rename(msg.ID, p.TextDocument.URI, p.Position, p.NewName)
 		default:
 			// Unknown request with an ID must still get a response, per spec.
 			if len(msg.ID) > 0 {
@@ -230,6 +252,48 @@ type didCloseParams struct {
 
 type formattingParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+type textDocumentPositionParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     position               `json:"position"`
+}
+
+type renameParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     position               `json:"position"`
+	NewName      string                 `json:"newName"`
+}
+
+type markupContent struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type hoverResult struct {
+	Contents markupContent `json:"contents"`
+}
+
+// completionItem — Kind 3 = Function (LSP CompletionItemKind), used for
+// both built-in gates and macros since Quell has no separate "keyword"
+// visual distinction worth the extra complexity here. InsertTextFormat 2 =
+// Snippet (tab stops like ${1:q0}); omitted (0) means plain text.
+type completionItem struct {
+	Label            string `json:"label"`
+	Kind             int    `json:"kind"`
+	Detail           string `json:"detail,omitempty"`
+	Documentation    string `json:"documentation,omitempty"`
+	InsertText       string `json:"insertText,omitempty"`
+	InsertTextFormat int    `json:"insertTextFormat,omitempty"`
+}
+
+type location struct {
+	URI   string   `json:"uri"`
+	Range lspRange `json:"range"`
+}
+
+type workspaceEdit struct {
+	Changes map[string][]textEdit `json:"changes"`
 }
 
 // lineRange spans an entire 1-indexed source line, converted to LSP's
