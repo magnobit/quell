@@ -16,7 +16,11 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          # 'stable' rather than a pinned patch version — recent Go stdlib
+          # CVEs (net/http, crypto/tls, encoding/xml, encoding/asn1) are
+          # only fixed in patch releases; floating on "latest stable" keeps
+          # CI on a patched toolchain automatically.
+          go-version: 'stable'
           cache-dependency-path: go.sum
 
       - name: Download modules
@@ -33,3 +37,8 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

@@ -9,29 +9,32 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
+	quelldocs "github.com/magnobit/quell"
+	"github.com/magnobit/quell/askdocs"
 	"github.com/magnobit/quell/convert"
-	"github.com/magnobit/quell/internal/qasmimport"
+	"github.com/magnobit/quell/migrate"
 	"github.com/spf13/cobra"
 )
 
 func newAskCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ask <question>",
-		Short:   "AI assistant for Quell and quantum computing (needs ANTHROPIC_API_KEY)",
+		Short:   "AI assistant for Quell and quantum computing (Claude when ANTHROPIC_API_KEY is set, local doc search otherwise)",
 		Example: `  quell ask "how does Grover's algorithm work?"`,
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			question := strings.Join(args, " ")
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
 			if apiKey == "" {
-				return fmt.Errorf("ANTHROPIC_API_KEY not set — run: export ANTHROPIC_API_KEY=your-key")
+				fmt.Println(askdocs.Answer(question, quelldocs.Docs()))
+				return nil
 			}
-			question := strings.Join(args, " ")
 			response, err := callClaude(apiKey, quellSystemPrompt(), question)
 			if err != nil {
-				return err
+				fmt.Println(askdocs.Answer(question, quelldocs.Docs()))
+				return nil
 			}
 			fmt.Println(response)
 			return nil
@@ -42,13 +45,16 @@ func newAskCmd() *cobra.Command {
 func newConvertCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "convert <file.py|file.qasm|file.qs>",
-		Short: "Convert OpenQASM (local) or Python/Q# (AI) to Quell",
+		Short: "Convert OpenQASM/Qiskit/Cirq/Q#/Braket to Quell",
 		Long: `Convert circuits into Quell.
 
-  • .qasm / .qasm2 / .qasm3 — local OpenQASM → Quell (no API key; # // /* */ comments ignored)
-  • .py / .qs — Claude-assisted when ANTHROPIC_API_KEY is set
-  • For deterministic Qiskit/Cirq/Q#/Braket import without an API key, use Labs Migrate
-    or POST /api/v1/ai/convert (language=qiskit|cirq|qsharp|braket|openqasm).
+  • .qasm / .qasm2 / .qasm3 — OpenQASM → Quell
+  • .py — Qiskit/Cirq/Braket → Quell
+  • .qs — Q# → Quell
+
+All of the above convert locally — no API key, no network call. When the
+local converter can't fully handle a Python file, set ANTHROPIC_API_KEY for
+an LLM-assisted second pass (export ANTHROPIC_API_KEY=your-key).
 
 Export Quell → other languages with:
   quell compile --target qiskit|cirq|openqasm|openqasm2|braket|qsharp file.quell`,
@@ -58,7 +64,6 @@ Export Quell → other languages with:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := args[0]
-			lower := strings.ToLower(path)
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -66,22 +71,21 @@ Export Quell → other languages with:
 			src := string(data)
 			lang := convert.DetectLanguage(src, path)
 
-			if strings.HasSuffix(lower, ".qasm") || strings.HasSuffix(lower, ".qasm2") || strings.HasSuffix(lower, ".qasm3") || lang == "openqasm" {
-				out, err := qasmimport.ToQuell(src)
-				if err != nil {
-					return fmt.Errorf("qasm import: %w", err)
+			result, mErr := migrate.ToQuell(src, lang)
+			if mErr == nil && strings.TrimSpace(result.Quell) != "" {
+				fmt.Print(result.Quell)
+				for _, w := range result.Warnings {
+					fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 				}
-				fmt.Print(out)
 				return nil
 			}
 
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
-			if apiKey == "" {
-				return fmt.Errorf("%s → Quell needs ANTHROPIC_API_KEY for CLI, or use Labs Migrate / POST /api/v1/ai/convert with language=%s (OpenQASM files convert locally without a key)", lang, lang)
-			}
-			ext := filepath.Ext(path)
-			if ext != ".py" && ext != ".qs" && ext != ".qsharp" && ext != ".quell" {
-				return fmt.Errorf("expected .py, .qs, .qasm, or .qasm3 file, got: %s", ext)
+			if apiKey == "" || !migrate.IsPythonish(lang, result.Language) {
+				if mErr != nil {
+					return mErr
+				}
+				return fmt.Errorf("conversion produced no Quell output")
 			}
 			prompt := fmt.Sprintf(`Convert the following %s quantum code to Quell language.
 
