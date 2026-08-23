@@ -1,0 +1,51 @@
+// QAOA Max-Cut on a 3-node triangle (edges 0-1, 1-2, 0-2). Best possible
+// cut is 2 of 3 edges — any answer except 000 or 111. p=2 layers: cost
+// unitary (ZZ per edge) then mixer (RX). Angles below are fixed starting
+// values; real QAOA tunes them with a classical optimizer loop.
+//
+// Two gotchas found by running this, not just deriving it on paper:
+// - `gate` only takes qubit args, not angles, so each layer gets its own
+//   small gate that closes over that layer's PARAM by name instead.
+// - gamma has to be negative. Flip the sign and the circuit confidently
+//   picks the *worst* cuts instead of the best ones.
+
+PARAM gamma1 : angle
+PARAM beta1 : angle
+PARAM gamma2 : angle
+PARAM beta2 : angle
+
+// Uniform superposition over all 8 partitions.
+H 0
+H 1
+H 2
+
+// ── Layer 1 ──
+GATE zz1 a b {
+CNOT a b
+RZ gamma1 b
+CNOT a b
+}
+ZZ1 0 1
+ZZ1 1 2
+ZZ1 0 2
+RX beta1 0
+RX beta1 1
+RX beta1 2
+
+// ── Layer 2 ──
+GATE zz2 a b {
+CNOT a b
+RZ gamma2 b
+CNOT a b
+}
+ZZ2 0 1
+ZZ2 1 2
+ZZ2 0 2
+RX beta2 0
+RX beta2 1
+RX beta2 2
+
+MEASURE
+
+// quell run qaoa_maxcut.quell --param gamma1=-0.8 --param beta1=0.4 --param gamma2=-0.6 --param beta2=0.2
+// Result: good cuts land ~14-16% each, 000/111 drop to ~5% each.

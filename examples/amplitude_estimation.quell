@@ -1,0 +1,40 @@
+// Amplitude amplification — the quantum core of amplitude estimation
+// (the technique JPMorgan/IBM used to price options with 100x fewer
+// samples than classical Monte Carlo). A = RY(theta) prepares |1> with
+// probability sin^2(theta/2) — stand-in for whatever you're estimating.
+// Each application of Q rotates that amplitude a further 2*theta, same
+// mechanism as Grover's, same quadratic speedup.
+//
+// Real Iterative Amplitude Estimation adds an adaptive classical loop on
+// top (grow the number of Q rounds, narrow a confidence interval on
+// theta from the stats) — not shown here, this is just the quantum
+// primitive it's built on, run for a fixed number of rounds.
+
+PARAM theta : angle
+qubit q
+
+RY theta q
+
+// "RY -theta q" doesn't parse (no negative-angle literal for a PARAM),
+// so RY(-theta) is built as X . RY(theta) . X instead — checked this
+// against the simulator, RY(theta) then that sandwich returns to |0>.
+GATE amplify q {
+Z q         // Schi: phase-flip the |1> ("good") outcome
+X q
+RY theta q
+X q         // A(inverse) = RY(-theta), via the X-sandwich identity
+X q
+Z q
+X q         // S0: reflect about |0>
+RY theta q  // A: re-prepare
+}
+
+// Two rounds — each extra `AMPLIFY q` line compounds the effect fast.
+AMPLIFY q
+AMPLIFY q
+
+MEASURE
+
+// quell run amplitude_estimation.quell --param theta=0.6
+// At theta=0.6: baseline P(|1>) ~10%, one round ~59%, two rounds ~99%.
+// Matches the predicted sin²((2k+1)θ/2) at each step.

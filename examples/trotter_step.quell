@@ -1,0 +1,32 @@
+// One first-order Trotter step of H = X⊗X + Z⊗I — a stand-in for a real
+// interaction term (Ising coupling + local field). This is the actual
+// near-term technique behind most chemistry/materials simulation work,
+// underneath VQE's more famous ansatz.
+//
+// exp(-i*t*H) ~= exp(-i*t*X⊗X) * exp(-i*t*Z⊗I) — only exact if the terms
+// commuted, which they don't, so real sims use many small steps instead
+// of one big one.
+//
+// theta below must be 2*t, not t — Quell doesn't do arithmetic on PARAM
+// references, and RZ(theta) = exp(-i*theta/2*Z).
+
+PARAM theta : angle
+qubit a, b
+
+// exp(-i*t*X⊗X): basis-change to Z⊗Z, ZZ rotation, change back. Checked
+// against cos(t)|00>-i*sin(t)|11> at t=PI/2: gives |11> at 100%.
+H a
+H b
+CNOT a b
+RZ theta b
+CNOT a b
+H a
+H b
+
+// exp(-i*t*Z⊗I): plain RZ on the qubit the Z term acts on.
+RZ theta a
+
+MEASURE
+
+// quell run trotter_step.quell --param theta=1.5708  (t = PI/4)
+// More, smaller steps approximate exp(-i*t*H) better than one big step.

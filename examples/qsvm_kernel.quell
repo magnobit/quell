@@ -1,0 +1,25 @@
+// Quantum kernel via SWAP test — the primitive behind QSVM. A classical
+// SVM needs a kernel K(x, x') measuring how similar two points are; here
+// each point is RY-encoded into a qubit, and the SWAP test estimates
+// their overlap K(x, x') = |<phi(x)|phi(x')>|^2 directly on hardware.
+// Real feature maps are deeper and multi-qubit (e.g. ZZFeatureMap) —
+// this one's just a single RY so the circuit stays readable.
+
+qubit x, xp, anc
+
+RY 0.6 x   // data point A
+RY 0.6 xp  // data point B (set equal to A for the "identical" test below)
+
+H anc
+CSWAP anc x xp
+H anc
+
+MEASURE
+
+// The histogram shows every qubit, highest-index first, so with `qubit
+// x, xp, anc` the leftmost bit is anc. Sum shot counts where that bit is
+// 0 to get P(anc=0); kernel K = 2*P(anc=0) - 1.
+//
+// quell run qsvm_kernel.quell
+// Identical points (x=x'=0.6): P(anc=0) ~100%, K~1.0.
+// Orthogonal points (x=0, x'=PI): P(anc=0) ~50%, K~0.0.

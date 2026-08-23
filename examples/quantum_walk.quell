@@ -1,0 +1,29 @@
+// Coined quantum walk — one step on a 4-node cycle (positions 0-3,
+// wrapping). The other major search paradigm alongside Grover's.
+//
+// `coin` decides direction, `lo`/`hi` hold the 2-bit position. Flip the
+// coin into superposition, then shift +1 on coin=1 and -1 on coin=0 —
+// both shifts run every time, each acting as identity on the branch it
+// doesn't match, which is what keeps both directions in superposition.
+
+qubit coin, lo, hi
+
+H coin
+
+// Controlled-increment on coin=1: standard 2-bit incrementer, CCX for
+// the carry, CNOT for the low bit.
+CCX coin lo hi
+CNOT coin lo
+
+// Controlled-decrement on coin=0: same incrementer, X-sandwiched so it
+// triggers on coin=0 instead.
+X coin
+CNOT coin lo
+CCX coin lo hi
+X coin
+
+MEASURE
+
+// quell run quantum_walk.quell
+// From position 0: lands entirely on positions 1 and 3 (~50/50), 0 and 2
+// get nothing. A classical random walk would still leave mass at 0.

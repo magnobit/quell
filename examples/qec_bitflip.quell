@@ -1,0 +1,45 @@
+// 3-qubit bit-flip code — the simplest real quantum error correction code.
+// Encodes one logical qubit across 3 physical ones (d0,d1,d2), so a single
+// bit-flip error on any one of them can be detected and corrected without
+// ever measuring the data qubits directly (which would destroy the state
+// this is meant to protect).
+//
+// Two ancillas (a0,a1) measure parity, not the data itself: a0 compares
+// d0/d1, a1 compares d1/d2. Which one flips tells you which data qubit is
+// wrong, the same way two overlapping checks can locate a single error.
+
+qubit d0, d1, d2, a0, a1
+
+// Encode a logical |1> across all 3 data qubits.
+X d0
+CNOT d0 d1
+CNOT d0 d2
+
+// A real bit-flip error would go here, e.g. X 1 to flip d1.
+
+// Syndrome extraction — parity checks, not direct measurement.
+CNOT d0 a0
+CNOT d1 a0
+CNOT d1 a1
+CNOT d2 a1
+MEASURE 3 -> c[0]
+MEASURE 4 -> c[1]
+
+// Correct based on the syndrome: 00=no error, 01=d0, 11=d1, 10=d2.
+SWITCH c {
+CASE 0: BARRIER
+CASE 1: X 0
+CASE 2: X 2
+CASE 3: X 1
+}
+
+MEASURE 0
+MEASURE 1
+MEASURE 2
+
+// Verified against the real simulator for all 4 cases (no error, error on
+// d0, d1, d2 — insert "X 0"/"X 1"/"X 2" before the syndrome section above):
+// every case ends with all 3 data qubits back at |1>, and the syndrome bits
+// correctly identify which qubit (if any) flipped.
+//
+// quell run qec_bitflip.quell
