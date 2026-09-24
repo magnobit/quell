@@ -1,0 +1,7 @@
+// 2-qubit QFT teaching circuit — H, controlled phase, SWAP.
+// Input |00⟩ stays uniform; change the input to see a different histogram.
+H 0
+CRZ PI/2 1 0
+H 1
+SWAP 0 1
+MEASURE

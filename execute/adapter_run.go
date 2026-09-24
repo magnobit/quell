@@ -14,8 +14,10 @@ import (
 type RunOpts struct {
 	Optimize    bool
 	Shots       int
-	QuellSource string // required for NVIDIA/Intel fallback when Config has no Extra
-	Noise       any
+	QuellSource  string // required for NVIDIA/Intel fallback when Config has no Extra
+	Noise        any
+	Coupling     [][2]int
+	CouplingName string
 }
 
 // RunQuell parses Quell source → IR → BackendAdapter. Preferred path for
@@ -38,12 +40,14 @@ func RunQuell(backend, quellSource string, cfg any, opts RunOpts) (*Result, erro
 		src = quellSource
 	}
 	return adapter.Run(name, &adapter.Job{
-		Program:     prog,
-		Optimize:    opts.Optimize,
-		Shots:       opts.Shots,
-		Config:      cfg,
-		QuellSource: src,
-		Noise:       opts.Noise,
+		Program:      prog,
+		Optimize:     opts.Optimize,
+		Shots:        opts.Shots,
+		Config:       cfg,
+		QuellSource:  src,
+		Noise:        opts.Noise,
+		Coupling:     opts.Coupling,
+		CouplingName: opts.CouplingName,
 	})
 }
 
@@ -51,11 +55,13 @@ func RunQuell(backend, quellSource string, cfg any, opts RunOpts) (*Result, erro
 // Callers inside this module (or tests) that already have IR use this.
 func RunProgram(backend string, prog *ir.Program, cfg any, opts RunOpts) (*Result, error) {
 	return adapter.Run(backend, &adapter.Job{
-		Program:     prog,
-		Optimize:    opts.Optimize,
-		Shots:       opts.Shots,
-		Config:      cfg,
-		QuellSource: opts.QuellSource,
-		Noise:       opts.Noise,
+		Program:      prog,
+		Optimize:     opts.Optimize,
+		Shots:        opts.Shots,
+		Config:       cfg,
+		QuellSource:  opts.QuellSource,
+		Noise:        opts.Noise,
+		Coupling:     opts.Coupling,
+		CouplingName: opts.CouplingName,
 	})
 }

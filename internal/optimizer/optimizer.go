@@ -34,7 +34,7 @@ const angleEpsilon = 1e-9
 func Optimize(p *ir.Program) (*ir.Program, []string) {
 	var notes []string
 
-	cur := &ir.Program{NumQubits: p.NumQubits, Ops: append([]ir.Op(nil), p.Ops...)}
+	cur := withOps(p, append([]ir.Op(nil), p.Ops...))
 
 	cur, n := dropZeroAngleRotations(cur)
 	notes = append(notes, n...)
@@ -51,6 +51,37 @@ func Optimize(p *ir.Program) (*ir.Program, []string) {
 	notes = append(notes, n...)
 
 	return cur, notes
+}
+
+// PassNames is the ordered list of conservative passes Optimize always
+// runs. Snapshotted at experiment-create time so later provenance reads
+// do not invent the current binary's pass list.
+func PassNames() []string {
+	return []string{
+		"zero_angle_elimination",
+		"self_inverse_cancellation",
+		"rotation_fusion",
+		"zero_angle_elimination",
+	}
+}
+
+// ApplyPass runs a single named conservative pass. Production Optimize
+// order is unchanged; this exists so equivalence debug can inspect
+// pass boundaries without a second optimizer.
+func ApplyPass(p *ir.Program, name string) (*ir.Program, []string) {
+	if p == nil {
+		return &ir.Program{}, nil
+	}
+	switch name {
+	case "zero_angle_elimination":
+		return dropZeroAngleRotations(p)
+	case "self_inverse_cancellation":
+		return cancelSelfInverse(p)
+	case "rotation_fusion":
+		return fuseRotations(p)
+	default:
+		return withOps(p, append([]ir.Op(nil), p.Ops...)), nil
+	}
 }
 
 // touchedQubits returns the qubits an op reads or writes. MEASURE and
@@ -127,7 +158,23 @@ func dropZeroAngleRotations(p *ir.Program) (*ir.Program, []string) {
 		}
 		kept = append(kept, op)
 	}
-	return &ir.Program{NumQubits: p.NumQubits, Ops: kept}, notes
+	return withOps(p, kept), notes
+}
+
+// withOps returns a new program with p's qubit/param/noise header and ops.
+func withOps(p *ir.Program, ops []ir.Op) *ir.Program {
+	if p == nil {
+		return &ir.Program{Ops: ops}
+	}
+	return &ir.Program{
+		NumQubits:             p.NumQubits,
+		Ops:                   ops,
+		Params:                append([]string(nil), p.Params...),
+		NoiseDepolarizing:     p.NoiseDepolarizing,
+		NoiseAmplitudeDamping: p.NoiseAmplitudeDamping,
+		NoisePhaseDamping:     p.NoisePhaseDamping,
+		NoiseReadout:          p.NoiseReadout,
+	}
 }
 
 // ── Pass 2: adjacent self-inverse cancellation ─────────────────────────────
@@ -250,7 +297,7 @@ func cancelSelfInverse(p *ir.Program) (*ir.Program, []string) {
 			kept = append(kept, n.op)
 		}
 	}
-	return &ir.Program{NumQubits: p.NumQubits, Ops: kept}, notes
+	return withOps(p, kept), notes
 }
 
 // ── Pass 3: rotation fusion ─────────────────────────────────────────────────
@@ -313,5 +360,5 @@ func fuseRotations(p *ir.Program) (*ir.Program, []string) {
 				c+1, n.op.Kind, qubitWord(n.op.Qubits)))
 		}
 	}
-	return &ir.Program{NumQubits: p.NumQubits, Ops: kept}, notes
+	return withOps(p, kept), notes
 }

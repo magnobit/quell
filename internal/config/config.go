@@ -41,6 +41,14 @@ type IBMConfig struct {
 	Device   string            `yaml:"device"`
 	Shots    int               `yaml:"shots"`
 	Extra    map[string]string `yaml:"extra"`
+	// BaseURL overrides the IBM Quantum Runtime API base URL. Empty (the
+	// default for every real caller) uses the public endpoint; used by
+	// contract tests to point RunIBM at an httptest server.
+	BaseURL string `yaml:"base_url"`
+	// OnSubmitted is invoked with the provider job id immediately after
+	// submit (before poll). Hosted callers persist it so cancel can reach
+	// the provider while the job is still running. Not a YAML field.
+	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 // AccessKeyID/SecretAccessKey/SessionToken are optional — when unset,
@@ -60,6 +68,12 @@ type AWSConfig struct {
 	S3Prefix        string            `yaml:"s3_prefix"`
 	Shots           int               `yaml:"shots"`
 	Extra           map[string]string `yaml:"extra"`
+	// BaseURL overrides both the Braket API base (normally built from
+	// Region) and the S3 results base. Empty (the default for every real
+	// caller) uses the real Braket/S3 hosts; used by contract tests to
+	// point RunBraket at a single httptest server.
+	BaseURL string `yaml:"base_url"`
+	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 type GCPConfig struct {
@@ -68,6 +82,13 @@ type GCPConfig struct {
 	Shots     int               `yaml:"shots"`
 	KeyFile   string            `yaml:"key_file"` // path to service account JSON, OR the raw JSON content itself (a hosted caller with no local filesystem per org can pass the key contents directly — see googleAccessToken)
 	Extra     map[string]string `yaml:"extra"`
+	// BaseURL overrides the Google Quantum Engine API base URL. Empty (the
+	// default for every real caller) uses the public endpoint; used by
+	// contract tests to point RunGoogle at an httptest server. (The OAuth2
+	// token endpoint is separately overridable via the service account
+	// JSON's own token_uri field.)
+	BaseURL string `yaml:"base_url"`
+	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 type RigettiConfig struct {
@@ -75,6 +96,11 @@ type RigettiConfig struct {
 	Device string            `yaml:"device"`
 	Shots  int               `yaml:"shots"`
 	Extra  map[string]string `yaml:"extra"`
+	// BaseURL overrides the Rigetti QCS API base URL. Empty (the default
+	// for every real caller) uses the public endpoint; used by contract
+	// tests to point RunRigetti at an httptest server.
+	BaseURL string `yaml:"base_url"`
+	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 type IonQConfig struct {
@@ -82,6 +108,11 @@ type IonQConfig struct {
 	Device string            `yaml:"device"`
 	Shots  int               `yaml:"shots"`
 	Extra  map[string]string `yaml:"extra"`
+	// BaseURL overrides the IonQ Cloud API base URL. Empty (the default
+	// for every real caller) uses the public endpoint; used by contract
+	// tests to point RunIonQ at an httptest server.
+	BaseURL string `yaml:"base_url"`
+	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 type AzureConfig struct {
@@ -94,6 +125,13 @@ type AzureConfig struct {
 	Target         string            `yaml:"target"`
 	Shots          int               `yaml:"shots"`
 	Extra          map[string]string `yaml:"extra"`
+	// BaseURL overrides both the AAD token endpoint (BaseURL+"/oauth2/v2.0/token")
+	// and the workspace management API base (normally built from
+	// SubscriptionID/ResourceGroup/Workspace). Empty (the default for
+	// every real caller) uses the real AAD/ARM hosts; used by contract
+	// tests to point RunAzure at a single httptest server.
+	BaseURL string `yaml:"base_url"`
+	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 type DWaveConfig struct {

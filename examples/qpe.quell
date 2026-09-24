@@ -1,0 +1,9 @@
+// 1-bit phase estimation of Z on |1> (educational).
+// Run: quell run examples/qpe.quell
+// Ideal simulator: phase bit leans toward 1. Hardware counts are not a SLA.
+
+H 0
+X 1
+CZ 0 1
+H 0
+MEASURE

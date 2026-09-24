@@ -1,0 +1,6 @@
+// Single-shot BB84-style prepare/measure (educational, not a full QKD stack).
+// Run: quell run examples/bb84.quell
+// Expected: a random bit. Hardware differs due to noise and basis mismatch.
+
+H 0
+MEASURE

@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Run opt-in live provider validation (needs secrets + budget)
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -42,3 +48,31 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  live-validate:
+    name: Live provider validation
+    if: github.event_name == 'workflow_dispatch' && inputs.live
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: go.sum
+      - name: Live tests (opt-in)
+        env:
+          QUELL_LIVE: '1'
+          QUELL_LIVE_SUBMIT: ${{ secrets.QUELL_LIVE_SUBMIT }}
+          QUELL_LIVE_BUDGET_APPROVED: ${{ secrets.QUELL_LIVE_BUDGET_APPROVED }}
+          QUELL_LIVE_MAX_JOBS: '2'
+          QUELL_LIVE_MAX_COST: '1.0'
+          QUELL_LIVE_MAX_DURATION: '15m'
+          QUELL_LIVE_PROVIDERS: ibm,ionq
+          IBM_QUANTUM_TOKEN: ${{ secrets.IBM_QUANTUM_TOKEN }}
+          IBM_TELEMETRY_TOKEN: ${{ secrets.IBM_TELEMETRY_TOKEN }}
+          IBM_TELEMETRY_DEVICE: ${{ secrets.IBM_TELEMETRY_DEVICE }}
+          IONQ_API_KEY: ${{ secrets.IONQ_API_KEY }}
+          IONQ_TELEMETRY_KEY: ${{ secrets.IONQ_TELEMETRY_KEY }}
+          IONQ_TELEMETRY_DEVICE: ${{ secrets.IONQ_TELEMETRY_DEVICE }}
+        run: go test -tags=live -count=1 ./livevalidate/...

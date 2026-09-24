@@ -3,12 +3,10 @@
 package backends
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/magnobit/quell/internal/config"
 )
@@ -33,18 +31,23 @@ func RunRigetti(cfg *config.RigettiConfig, qasm3 string) (*RunResult, error) {
 	if shots == 0 {
 		shots = 1024
 	}
+	base := rigettiBase
+	if cfg.BaseURL != "" {
+		base = cfg.BaseURL
+	}
 
-	jobID, err := rigettiSubmit(cfg.APIKey, cfg.Device, qasm3, shots, cfg.Extra)
+	jobID, err := rigettiSubmit(base, cfg.APIKey, cfg.Device, qasm3, shots, cfg.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("rigetti: submit: %w", err)
 	}
+	notifySubmitted(cfg.OnSubmitted, jobID)
 	fmt.Printf("  Rigetti job submitted: %s\n", jobID)
 
-	if err := rigettiPoll(cfg.APIKey, jobID); err != nil {
+	if err := rigettiPoll(base, cfg.APIKey, jobID); err != nil {
 		return nil, fmt.Errorf("rigetti: %w", err)
 	}
 
-	counts, err := rigettiResults(cfg.APIKey, jobID)
+	counts, err := rigettiResults(base, cfg.APIKey, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("rigetti: results: %w", err)
 	}
@@ -57,7 +60,7 @@ func RunRigetti(cfg *config.RigettiConfig, qasm3 string) (*RunResult, error) {
 	}, nil
 }
 
-func rigettiSubmit(apiKey, device, qasm3 string, shots int, extra map[string]string) (string, error) {
+func rigettiSubmit(base, apiKey, device, qasm3 string, shots int, extra map[string]string) (string, error) {
 	payload := map[string]any{
 		"quantumProcessorId": device,
 		"shots":              shots,
@@ -69,7 +72,7 @@ func rigettiSubmit(apiKey, device, qasm3 string, shots int, extra map[string]str
 	mergeExtra(payload, extra)
 	body, _ := json.Marshal(payload)
 
-	resp, err := rigettiDo("POST", rigettiBase+"/jobs", apiKey, body)
+	resp, err := rigettiDo("POST", base+"/jobs", apiKey, body)
 	if err != nil {
 		return "", err
 	}
@@ -91,39 +94,35 @@ func rigettiSubmit(apiKey, device, qasm3 string, shots int, extra map[string]str
 	return r.ID, nil
 }
 
-func rigettiPoll(apiKey, jobID string) error {
-	url := fmt.Sprintf("%s/jobs/%s", rigettiBase, jobID)
-	for {
+func rigettiPoll(base, apiKey, jobID string) error {
+	url := fmt.Sprintf("%s/jobs/%s", base, jobID)
+	return pollUntil("rigetti", jobID, func() (pollTick, error) {
 		resp, err := rigettiDo("GET", url, apiKey, nil)
 		if err != nil {
-			return err
+			return pollTick{}, err
 		}
 		var r struct {
 			Status string `json:"status"`
 			Error  string `json:"error"`
 		}
-		json.NewDecoder(resp.Body).Decode(&r)
+		decErr := json.NewDecoder(resp.Body).Decode(&r)
 		resp.Body.Close()
-
+		if decErr != nil {
+			return pollTick{}, &ProviderError{Provider: "rigetti", Class: ClassInvalidRequest, Message: "malformed job status"}
+		}
 		switch r.Status {
 		case "COMPLETED":
-			fmt.Print("\n")
-			return nil
+			return pollTick{Done: true, Status: r.Status}, nil
 		case "FAILED", "CANCELLED":
-			msg := r.Error
-			if msg == "" {
-				msg = r.Status
-			}
-			return fmt.Errorf("job %s: %s", jobID, msg)
+			return pollTick{Failed: true, Status: r.Status, Message: r.Error}, nil
 		default:
-			fmt.Printf("\r  Rigetti job status: %-10s", r.Status)
-			time.Sleep(4 * time.Second)
+			return pollTick{Status: r.Status}, nil
 		}
-	}
+	})
 }
 
-func rigettiResults(apiKey, jobID string) (map[string]int, error) {
-	url := fmt.Sprintf("%s/jobs/%s/results", rigettiBase, jobID)
+func rigettiResults(base, apiKey, jobID string) (map[string]int, error) {
+	url := fmt.Sprintf("%s/jobs/%s/results", base, jobID)
 	resp, err := rigettiDo("GET", url, apiKey, nil)
 	if err != nil {
 		return nil, err
@@ -141,26 +140,25 @@ func rigettiResults(apiKey, jobID string) (map[string]int, error) {
 }
 
 func rigettiDo(method, url, apiKey string, body []byte) (*http.Response, error) {
-	var r io.Reader
-	if body != nil {
-		r = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, url, r)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	return doJSON("rigetti", method, url, "Bearer "+apiKey, nil, body)
+}
 
-	resp, err := http.DefaultClient.Do(req)
+// CancelRigetti asks Rigetti QCS to cancel an in-flight job.
+func CancelRigetti(cfg *config.RigettiConfig, providerJobID string) error {
+	if cfg == nil || cfg.APIKey == "" {
+		return fmt.Errorf("rigetti: api_key is required to cancel")
+	}
+	if providerJobID == "" {
+		return fmt.Errorf("rigetti: provider job id is required to cancel")
+	}
+	base := rigettiBase
+	if cfg.BaseURL != "" {
+		base = cfg.BaseURL
+	}
+	resp, err := rigettiDo("DELETE", base+"/jobs/"+providerJobID, cfg.APIKey, nil)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("rigetti: cancel: %w", err)
 	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d from Rigetti: %s", resp.StatusCode, string(b))
-	}
-	return resp, nil
+	resp.Body.Close()
+	return nil
 }

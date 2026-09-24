@@ -8,7 +8,6 @@
 package backends
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/magnobit/quell/internal/config"
 )
@@ -41,18 +39,23 @@ func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, err
 	if shots == 0 {
 		shots = 1024
 	}
+	base := ibmBase
+	if cfg.BaseURL != "" {
+		base = cfg.BaseURL
+	}
 
-	jobID, err := ibmSubmit(cfg.Token, cfg.Device, cfg.Instance, qasm3, shots, cfg.Extra)
+	jobID, err := ibmSubmit(base, cfg.Token, cfg.Device, cfg.Instance, qasm3, shots, cfg.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("ibm: submit: %w", err)
 	}
+	notifySubmitted(cfg.OnSubmitted, jobID)
 	fmt.Printf("  IBM job submitted: %s\n", jobID)
 
-	if err := ibmPoll(cfg.Token, jobID); err != nil {
+	if err := ibmPoll(base, cfg.Token, jobID); err != nil {
 		return nil, fmt.Errorf("ibm: %w", err)
 	}
 
-	counts, err := ibmResults(cfg.Token, jobID, shots, numQubits)
+	counts, err := ibmResults(base, cfg.Token, jobID, shots, numQubits)
 	if err != nil {
 		return nil, fmt.Errorf("ibm: results: %w", err)
 	}
@@ -65,7 +68,7 @@ func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, err
 	}, nil
 }
 
-func ibmSubmit(token, backend, instance, qasm3 string, shots int, extra map[string]string) (string, error) {
+func ibmSubmit(base, token, backend, instance, qasm3 string, shots int, extra map[string]string) (string, error) {
 	params := map[string]any{
 		"pubs":    []any{[]any{qasm3, nil, shots}},
 		"version": 2,
@@ -79,7 +82,7 @@ func ibmSubmit(token, backend, instance, qasm3 string, shots int, extra map[stri
 		"params":     params,
 	})
 
-	resp, err := ibmDo("POST", ibmBase+"/runtime/jobs", token, body)
+	resp, err := ibmDo("POST", base+"/runtime/jobs", token, body)
 	if err != nil {
 		return "", err
 	}
@@ -101,12 +104,12 @@ func ibmSubmit(token, backend, instance, qasm3 string, shots int, extra map[stri
 	return r.ID, nil
 }
 
-func ibmPoll(token, jobID string) error {
-	url := fmt.Sprintf("%s/runtime/jobs/%s", ibmBase, jobID)
-	for {
+func ibmPoll(base, token, jobID string) error {
+	url := fmt.Sprintf("%s/runtime/jobs/%s", base, jobID)
+	return pollUntil("ibm", jobID, func() (pollTick, error) {
 		resp, err := ibmDo("GET", url, token, nil)
 		if err != nil {
-			return err
+			return pollTick{}, err
 		}
 		var r struct {
 			Status string `json:"status"`
@@ -114,28 +117,24 @@ func ibmPoll(token, jobID string) error {
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		json.NewDecoder(resp.Body).Decode(&r)
+		decErr := json.NewDecoder(resp.Body).Decode(&r)
 		resp.Body.Close()
-
+		if decErr != nil {
+			return pollTick{}, &ProviderError{Provider: "ibm", Class: ClassInvalidRequest, Message: "malformed job status"}
+		}
 		switch r.Status {
 		case "Completed":
-			fmt.Print("\n")
-			return nil
+			return pollTick{Done: true, Status: r.Status}, nil
 		case "Failed", "Cancelled":
-			msg := r.Error.Message
-			if msg == "" {
-				msg = r.Status
-			}
-			return fmt.Errorf("job %s: %s", jobID, msg)
+			return pollTick{Failed: true, Status: r.Status, Message: r.Error.Message}, nil
 		default:
-			fmt.Printf("\r  IBM job status: %-10s (job: %s)", r.Status, jobID[:min(8, len(jobID))])
-			time.Sleep(4 * time.Second)
+			return pollTick{Status: r.Status}, nil
 		}
-	}
+	})
 }
 
-func ibmResults(token, jobID string, shots, numQubits int) (map[string]int, error) {
-	url := fmt.Sprintf("%s/runtime/jobs/%s/results", ibmBase, jobID)
+func ibmResults(base, token, jobID string, shots, numQubits int) (map[string]int, error) {
+	url := fmt.Sprintf("%s/runtime/jobs/%s/results", base, jobID)
 	resp, err := ibmDo("GET", url, token, nil)
 	if err != nil {
 		return nil, err
@@ -268,7 +267,7 @@ func hexCountsToStr(hexCounts map[string]int, numQubits int) map[string]int {
 			}
 		}
 		if maxVal > 0 {
-			width = int(math.Ceil(math.Log2(float64(maxVal+1))))
+			width = int(math.Ceil(math.Log2(float64(maxVal + 1))))
 		}
 		if width < 1 {
 			width = 1
@@ -284,34 +283,27 @@ func hexCountsToStr(hexCounts map[string]int, numQubits int) map[string]int {
 }
 
 func ibmDo(method, url, token string, body []byte) (*http.Response, error) {
-	var r io.Reader
-	if body != nil {
-		r = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, url, r)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("IBM-API-Version", "2024-06-14")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d from IBM: %s", resp.StatusCode, string(b))
-	}
-	return resp, nil
+	extra := http.Header{}
+	extra.Set("IBM-API-Version", "2024-06-14")
+	return doJSON("ibm", method, url, "Bearer "+token, extra, body)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// CancelIBM asks IBM Quantum Runtime to cancel an in-flight job.
+func CancelIBM(cfg *config.IBMConfig, providerJobID string) error {
+	if cfg == nil || cfg.Token == "" {
+		return fmt.Errorf("ibm: token is required to cancel")
 	}
-	return b
+	if providerJobID == "" {
+		return fmt.Errorf("ibm: provider job id is required to cancel")
+	}
+	base := ibmBase
+	if cfg.BaseURL != "" {
+		base = cfg.BaseURL
+	}
+	resp, err := ibmDo("POST", base+"/runtime/jobs/"+providerJobID+"/cancel", cfg.Token, nil)
+	if err != nil {
+		return fmt.Errorf("ibm: cancel: %w", err)
+	}
+	resp.Body.Close()
+	return nil
 }

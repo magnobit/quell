@@ -9,6 +9,11 @@
 coverage.out
 *.out
 
+# Env / logs
+.env
+.env.local
+*.log
+
 # Editor
 .idea/
 .vscode/

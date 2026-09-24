@@ -1,6 +1,7 @@
 // Bell pair — creates maximum quantum entanglement between 2 qubits
 // Run: quell run bell.quell
-// Expected: 50% |00⟩, 50% |11⟩
+// Structural expectation: 2 logical qubits, 1 CNOT, MEASURE.
+// Ideal simulator: 50% |00>, 50% |11>. Hardware counts are not a SLA.
 
 H 0
 CNOT 0 1

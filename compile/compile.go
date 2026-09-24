@@ -6,7 +6,9 @@ package compile
 
 import (
 	"github.com/magnobit/quell/internal/compiler"
+	"github.com/magnobit/quell/internal/optimizer"
 	"github.com/magnobit/quell/internal/parser"
+	"github.com/magnobit/quell/internal/topology"
 	"github.com/magnobit/quell/log"
 	"github.com/magnobit/quell/qerr"
 )
@@ -114,7 +116,46 @@ func CompileFileWithWarnings(path string, target Target, optimize bool) (Compile
 }
 
 func compileCircuit(c *parser.Circuit, target Target, optimize bool) (CompileResult, error) {
-	code, notes, err := compiler.Compile(c, target, optimize)
+	return compileCircuitOpts(c, target, CompileOptions{Optimize: optimize})
+}
+
+// CompileOptions selects how the IR optimizer runs before target emission.
+// Coupling is the selected backend's edge list (scheduler/provider
+// topology). Nil Coupling keeps the existing generic Optimize path.
+// Never pass a static teaching preset name as CouplingName for live data.
+type CompileOptions struct {
+	Optimize     bool
+	Coupling     [][2]int
+	CouplingName string
+}
+
+// CompileWithOptions is CompileWithWarnings plus optional coupling-aware
+// routing via optimizer.OptimizeWithOptions.
+func CompileWithOptions(src string, target Target, opts CompileOptions) (CompileResult, error) {
+	c, err := parser.Parse(src)
+	if err != nil {
+		log.Error("parse failed", "err", err, "target", string(target))
+		return CompileResult{}, qerr.Wrap(qerr.KindParse, "compile", err)
+	}
+	r, err := compileCircuitOpts(c, target, opts)
+	if err != nil {
+		log.Error("compile failed", "err", err, "target", string(target), "qubits", c.NumQubits)
+		return CompileResult{}, qerr.Compile("compile", err)
+	}
+	return r, nil
+}
+
+func compileCircuitOpts(c *parser.Circuit, target Target, opts CompileOptions) (CompileResult, error) {
+	var code string
+	var notes []string
+	var err error
+	if len(opts.Coupling) > 0 {
+		code, notes, err = compiler.CompileOpts(c, target, opts.Optimize, optimizer.Options{
+			Coupling: topology.FromEdges(opts.CouplingName, opts.Coupling),
+		})
+	} else {
+		code, notes, err = compiler.Compile(c, target, opts.Optimize)
+	}
 	if err != nil {
 		return CompileResult{}, err
 	}

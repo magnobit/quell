@@ -30,6 +30,19 @@ import (
 // real hardware or a dedicated HPC simulator, not a CLI's built-in one.
 const maxQubits = 24
 
+// MaxQubits is the local simulator's hard amplitude-vector ceiling.
+func MaxQubits() int { return maxQubits }
+
+// Amplitudes returns a copy of the dense state vector.
+func (sv *StateVector) Amplitudes() []complex128 {
+	if sv == nil {
+		return nil
+	}
+	out := make([]complex128, len(sv.amp))
+	copy(out, sv.amp)
+	return out
+}
+
 // StateVector is a dense state-vector simulator: the full 2^N complex
 // amplitude vector, with the same single/multi-qubit gate matrix
 // conventions used elsewhere in Quell (see internal/compiler's OpenQASM/
@@ -88,10 +101,10 @@ func (sv *StateVector) H(q int) {
 	v := complex(math.Sqrt2/2, 0)
 	sv.apply1(q, v, v, v, -v)
 }
-func (sv *StateVector) X(q int)  { sv.apply1(q, 0, 1, 1, 0) }
-func (sv *StateVector) Y(q int)  { sv.apply1(q, 0, complex(0, -1), complex(0, 1), 0) }
-func (sv *StateVector) Z(q int)  { sv.apply1(q, 1, 0, 0, -1) }
-func (sv *StateVector) S(q int)  { sv.apply1(q, 1, 0, 0, complex(0, 1)) }
+func (sv *StateVector) X(q int)   { sv.apply1(q, 0, 1, 1, 0) }
+func (sv *StateVector) Y(q int)   { sv.apply1(q, 0, complex(0, -1), complex(0, 1), 0) }
+func (sv *StateVector) Z(q int)   { sv.apply1(q, 1, 0, 0, -1) }
+func (sv *StateVector) S(q int)   { sv.apply1(q, 1, 0, 0, complex(0, 1)) }
 func (sv *StateVector) SDG(q int) { sv.apply1(q, 1, 0, 0, complex(0, -1)) }
 func (sv *StateVector) T(q int) {
 	sv.apply1(q, 1, 0, 0, cmplx.Exp(complex(0, math.Pi/4)))
@@ -256,7 +269,7 @@ func (sv *StateVector) MeasureBit(q int, rng *rand.Rand) int {
 	// Project and renormalize
 	norm := 0.0
 	for i := range sv.amp {
-		if ((i>>q)&1) != bit {
+		if ((i >> q) & 1) != bit {
 			sv.amp[i] = 0
 		} else {
 			norm += real(sv.amp[i])*real(sv.amp[i]) + imag(sv.amp[i])*imag(sv.amp[i])
@@ -421,6 +434,49 @@ func RunProgramOpts(p *ir.Program, opt Options) (*Result, error) {
 		Counts:    counts,
 		Probs:     sv.Probs(),
 	}, nil
+}
+
+// EvolveUnitary applies the unitary prefix of p (gates until the first
+// MEASURE) and returns the resulting state. RESET, mid-circuit measure,
+// and classical control are rejected — callers that need those must use
+// RunProgramOpts / trajectories instead of pretending the circuit is
+// a pure-state unitary.
+func EvolveUnitary(p *ir.Program) (*StateVector, error) {
+	if p == nil {
+		return nil, fmt.Errorf("simulate: nil program")
+	}
+	if ir.NeedsBind(p) {
+		return nil, fmt.Errorf("simulate: circuit has unbound parameters %v", ir.UnboundParams(p))
+	}
+	n := p.NumQubits
+	if n < 1 {
+		n = 1
+	}
+	if n > maxQubits {
+		return nil, fmt.Errorf("simulate: %d qubits exceeds the local simulator's limit of %d", n, maxQubits)
+	}
+	sv := New(n)
+	for _, op := range p.Ops {
+		switch op.Kind {
+		case ir.OpMEASURE:
+			return sv, nil
+		case ir.OpRESET:
+			return nil, fmt.Errorf("simulate: RESET is not a unitary prefix operation")
+		case ir.OpIF, ir.OpWHILE, ir.OpSWITCH, ir.OpASSERT:
+			return nil, fmt.Errorf("simulate: classical control %q is not a unitary prefix operation", op.Kind)
+		case ir.OpPAR:
+			for _, bop := range op.Then {
+				if err := apply(sv, bop); err != nil {
+					return nil, err
+				}
+			}
+		default:
+			if err := apply(sv, op); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return sv, nil
 }
 
 func runTrajectories(p *ir.Program, shots, n int, noise NoiseModel, seed int64) (*Result, error) {
