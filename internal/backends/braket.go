@@ -61,13 +61,14 @@ func RunBraket(cfg *config.AWSConfig, qasm3 string) (*RunResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("braket: submit: %w", err)
 	}
+	notifySubmitted(cfg.OnSubmitted, taskArn)
 	fmt.Printf("  Braket task submitted: %s\n", taskArn)
 
 	if err := braketPoll(cfg, creds, taskArn); err != nil {
 		return nil, fmt.Errorf("braket: %w", err)
 	}
 
-	counts, err := braketResults(cfg.Region, creds, s3Bucket, s3Dir)
+	counts, err := braketResults(cfg, creds, s3Bucket, s3Dir)
 	if err != nil {
 		return nil, fmt.Errorf("braket: results: %w", err)
 	}
@@ -80,6 +81,15 @@ func RunBraket(cfg *config.AWSConfig, qasm3 string) (*RunResult, error) {
 	}, nil
 }
 
+// braketEndpoint returns the Braket API base URL: cfg.BaseURL when set
+// (contract tests), otherwise the real per-region Braket host.
+func braketEndpoint(cfg *config.AWSConfig) string {
+	if cfg.BaseURL != "" {
+		return cfg.BaseURL
+	}
+	return fmt.Sprintf("https://braket.%s.amazonaws.com", cfg.Region)
+}
+
 type awsCreds struct {
 	AccessKeyID     string
 	SecretAccessKey string
@@ -87,7 +97,7 @@ type awsCreds struct {
 }
 
 func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int) (taskArn, s3Bucket, s3Dir string, err error) {
-	endpoint := fmt.Sprintf("https://braket.%s.amazonaws.com", cfg.Region)
+	endpoint := braketEndpoint(cfg)
 
 	// The action field must be a JSON-encoded string (doubly serialised)
 	action := map[string]any{
@@ -117,8 +127,8 @@ func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int
 	defer resp.Body.Close()
 
 	var r struct {
-		QuantumTaskArn  string `json:"quantumTaskArn"`
-		OutputS3Bucket  string `json:"outputS3Bucket"`
+		QuantumTaskArn    string `json:"quantumTaskArn"`
+		OutputS3Bucket    string `json:"outputS3Bucket"`
 		OutputS3Directory string `json:"outputS3Directory"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
@@ -131,45 +141,43 @@ func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int
 }
 
 func braketPoll(cfg *config.AWSConfig, creds awsCreds, taskArn string) error {
-	// URL-encode the ARN for the path
-	endpoint := fmt.Sprintf("https://braket.%s.amazonaws.com/quantum-task/%s",
-		cfg.Region, url.PathEscape(taskArn))
-
-	for {
+	endpoint := fmt.Sprintf("%s/quantum-task/%s", braketEndpoint(cfg), url.PathEscape(taskArn))
+	return pollUntil("aws", taskArn, func() (pollTick, error) {
 		resp, err := awsDo("GET", endpoint, cfg.Region, "braket", creds, nil)
 		if err != nil {
-			return err
+			return pollTick{}, err
 		}
 		var r struct {
-			Status string `json:"status"`
+			Status        string `json:"status"`
 			FailureReason string `json:"failureReason"`
 		}
-		json.NewDecoder(resp.Body).Decode(&r)
+		decErr := json.NewDecoder(resp.Body).Decode(&r)
 		resp.Body.Close()
-
+		if decErr != nil {
+			return pollTick{}, &ProviderError{Provider: "aws", Class: ClassInvalidRequest, Message: "malformed job status"}
+		}
 		switch r.Status {
 		case "COMPLETED":
-			fmt.Print("\n")
-			return nil
+			return pollTick{Done: true, Status: r.Status}, nil
 		case "FAILED", "CANCELLED":
-			msg := r.FailureReason
-			if msg == "" {
-				msg = r.Status
-			}
-			return fmt.Errorf("task %s: %s", taskArn, msg)
+			return pollTick{Failed: true, Status: r.Status, Message: r.FailureReason}, nil
 		default:
-			fmt.Printf("\r  Braket task status: %-10s", r.Status)
-			time.Sleep(5 * time.Second)
+			return pollTick{Status: r.Status}, nil
 		}
-	}
+	})
 }
 
-func braketResults(region string, creds awsCreds, bucket, directory string) (map[string]int, error) {
+func braketResults(cfg *config.AWSConfig, creds awsCreds, bucket, directory string) (map[string]int, error) {
 	// Results are in s3://{bucket}/{directory}/results.json
-	s3URL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/results.json",
-		bucket, region, strings.TrimPrefix(directory, "/"))
+	var s3URL string
+	if cfg.BaseURL != "" {
+		s3URL = fmt.Sprintf("%s/%s/%s/results.json", cfg.BaseURL, bucket, strings.TrimPrefix(directory, "/"))
+	} else {
+		s3URL = fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/results.json",
+			bucket, cfg.Region, strings.TrimPrefix(directory, "/"))
+	}
 
-	resp, err := awsDo("GET", s3URL, region, "s3", creds, nil)
+	resp, err := awsDo("GET", s3URL, cfg.Region, "s3", creds, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -177,8 +185,8 @@ func braketResults(region string, creds awsCreds, bucket, directory string) (map
 	raw, _ := io.ReadAll(resp.Body)
 
 	var result struct {
-		Measurements [][]int `json:"measurements"`
-		MeasuredQubits []int `json:"measuredQubits"`
+		Measurements             [][]int            `json:"measurements"`
+		MeasuredQubits           []int              `json:"measuredQubits"`
 		MeasurementProbabilities map[string]float64 `json:"measurementProbabilities"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
@@ -214,6 +222,42 @@ func braketResults(region string, creds awsCreds, bucket, directory string) (map
 	}
 
 	return nil, fmt.Errorf("no measurements in Braket result: %s", string(raw))
+}
+
+// CancelBraket asks AWS Braket to cancel an in-flight quantum task.
+func CancelBraket(cfg *config.AWSConfig, providerJobID string) error {
+	if cfg == nil {
+		return fmt.Errorf("braket: config is required to cancel")
+	}
+	if providerJobID == "" {
+		return fmt.Errorf("braket: provider job id is required to cancel")
+	}
+	accessKey := cfg.AccessKeyID
+	if accessKey == "" {
+		accessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	}
+	secretKey := cfg.SecretAccessKey
+	if secretKey == "" {
+		secretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	}
+	sessionToken := cfg.SessionToken
+	if sessionToken == "" {
+		sessionToken = os.Getenv("AWS_SESSION_TOKEN")
+	}
+	if accessKey == "" || secretKey == "" {
+		return fmt.Errorf("braket: access_key_id/secret_access_key are required to cancel")
+	}
+	if cfg.Region == "" {
+		cfg.Region = "us-east-1"
+	}
+	creds := awsCreds{accessKey, secretKey, sessionToken}
+	endpoint := fmt.Sprintf("%s/quantum-task/%s/cancel", braketEndpoint(cfg), url.PathEscape(providerJobID))
+	resp, err := awsDo("PUT", endpoint, cfg.Region, "braket", creds, []byte(`{}`))
+	if err != nil {
+		return fmt.Errorf("braket: cancel: %w", err)
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // awsDo makes a SigV4-signed HTTP request to an AWS service.
@@ -290,14 +334,14 @@ func awsDo(method, rawURL, region, service string, creds awsCreds, body []byte) 
 		creds.AccessKeyID, credScope, signedHeaders, sig)
 	req.Header.Set("Authorization", authHeader)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &ProviderError{Provider: "aws", Class: classifyNet(err), Message: redactSecrets(err.Error())}
 	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d from AWS %s: %s", resp.StatusCode, service, string(b))
+		return nil, httpStatusError("aws", resp.StatusCode, b)
 	}
 	return resp, nil
 }

@@ -3,9 +3,11 @@
 package compiler_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/magnobit/quell/internal/compiler"
+	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
 )
 
@@ -115,5 +117,29 @@ func TestCompileOptimizeRemovesRedundantGates(t *testing.T) {
 	want := "OPENQASM 3;\nqubit[1] q;\nbit[1] c;\n\nc = measure q;\n"
 	if code != want {
 		t.Fatalf("optimized output mismatch:\ngot:\n%q\nwant:\n%q", code, want)
+	}
+}
+
+func TestCompile_ParameterizedBindThenSubmit(t *testing.T) {
+	circ, err := parser.Parse("PARAM theta : angle\nRX theta 0\nMEASURE\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := compiler.Compile(circ, compiler.TargetOpenQASM, false); err == nil {
+		t.Fatal("unbound PARAM must not compile to provider QASM")
+	}
+	bound, err := ir.Bind(ir.Lower(circ), map[string]float64{"theta": 1.5707963267948966})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _, err := compiler.CompileProgram(bound, compiler.TargetOpenQASM, false)
+	if err != nil {
+		t.Fatalf("bound PARAM must compile to a concrete circuit: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(code), "rx") {
+		t.Errorf("compiled QASM = %q, want a concrete rx", code)
+	}
+	if strings.Contains(code, "theta") {
+		t.Errorf("compiled QASM still contains symbolic theta: %q", code)
 	}
 }

@@ -3,7 +3,6 @@
 package backends
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,7 +42,11 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 		shots = 500
 	}
 
-	token, err := azureAccessToken(cfg.TenantID, cfg.ClientID, cfg.ClientSecret)
+	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", cfg.TenantID)
+	if cfg.BaseURL != "" {
+		tokenURL = cfg.BaseURL + "/oauth2/v2.0/token"
+	}
+	token, err := azureAccessToken(tokenURL, cfg.ClientID, cfg.ClientSecret)
 	if err != nil {
 		return nil, fmt.Errorf("azure: auth: %w", err)
 	}
@@ -53,6 +56,7 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure: submit: %w", err)
 	}
+	notifySubmitted(cfg.OnSubmitted, jobID)
 	fmt.Printf("  Azure Quantum job submitted: %s\n", jobID)
 
 	if err := azurePoll(token, cfg, jobID); err != nil {
@@ -74,18 +78,16 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 
 // azureAccessToken exchanges AAD service-principal credentials for a bearer
 // token via the client-credentials grant.
-func azureAccessToken(tenantID, clientID, clientSecret string) (string, error) {
-	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID)
-
+func azureAccessToken(tokenURL, clientID, clientSecret string) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
 	form.Set("scope", azureScope)
 
-	resp, err := http.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	resp, err := providerHTTPClient.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", &ProviderError{Provider: "azure", Class: classifyNet(err), Message: redactSecrets(err.Error())}
 	}
 	defer resp.Body.Close()
 
@@ -107,6 +109,9 @@ func azureAccessToken(tenantID, clientID, clientSecret string) (string, error) {
 }
 
 func azureWorkspaceBase(cfg *config.AzureConfig) string {
+	if cfg.BaseURL != "" {
+		return cfg.BaseURL
+	}
 	return fmt.Sprintf("https://management.azure.com/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Quantum/workspaces/%s",
 		cfg.SubscriptionID, cfg.ResourceGroup, cfg.Workspace)
 }
@@ -138,13 +143,13 @@ func azureSubmit(token string, cfg *config.AzureConfig, qasm3 string, shots int)
 	mergeExtra(inputParams, extra)
 
 	body, _ := json.Marshal(map[string]any{
-		"id":                jobID,
-		"target":            cfg.Target,
-		"name":              "quell-job",
-		"inputDataFormat":   inputDataFormat,
-		"outputDataFormat":  "microsoft.quantum-results.v1",
-		"inputParams":       inputParams,
-		"inputData":         qasm3,
+		"id":               jobID,
+		"target":           cfg.Target,
+		"name":             "quell-job",
+		"inputDataFormat":  inputDataFormat,
+		"outputDataFormat": "microsoft.quantum-results.v1",
+		"inputParams":      inputParams,
+		"inputData":        qasm3,
 	})
 
 	resp, err := azureDo("PUT", reqURL, token, body)
@@ -167,10 +172,10 @@ func azureSubmit(token string, cfg *config.AzureConfig, qasm3 string, shots int)
 
 func azurePoll(token string, cfg *config.AzureConfig, jobID string) error {
 	reqURL := fmt.Sprintf("%s/jobs/%s?api-version=2022-09-12-preview", azureWorkspaceBase(cfg), jobID)
-	for {
+	return pollUntil("azure", jobID, func() (pollTick, error) {
 		resp, err := azureDo("GET", reqURL, token, nil)
 		if err != nil {
-			return err
+			return pollTick{}, err
 		}
 		var r struct {
 			Status    string `json:"status"`
@@ -178,24 +183,20 @@ func azurePoll(token string, cfg *config.AzureConfig, jobID string) error {
 				Message string `json:"message"`
 			} `json:"errorData"`
 		}
-		json.NewDecoder(resp.Body).Decode(&r)
+		decErr := json.NewDecoder(resp.Body).Decode(&r)
 		resp.Body.Close()
-
+		if decErr != nil {
+			return pollTick{}, &ProviderError{Provider: "azure", Class: ClassInvalidRequest, Message: "malformed job status"}
+		}
 		switch r.Status {
 		case "Succeeded":
-			fmt.Print("\n")
-			return nil
+			return pollTick{Done: true, Status: r.Status}, nil
 		case "Failed", "Cancelled":
-			msg := r.ErrorData.Message
-			if msg == "" {
-				msg = r.Status
-			}
-			return fmt.Errorf("job %s: %s", jobID, msg)
+			return pollTick{Failed: true, Status: r.Status, Message: r.ErrorData.Message}, nil
 		default:
-			fmt.Printf("\r  Azure Quantum job status: %-12s", r.Status)
-			time.Sleep(5 * time.Second)
+			return pollTick{Status: r.Status}, nil
 		}
-	}
+	})
 }
 
 func azureResults(token string, cfg *config.AzureConfig, jobID string) (map[string]int, error) {
@@ -231,26 +232,30 @@ func azureResults(token string, cfg *config.AzureConfig, jobID string) (map[stri
 }
 
 func azureDo(method, url, token string, body []byte) (*http.Response, error) {
-	var r io.Reader
-	if body != nil {
-		r = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, url, r)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	return doJSON("azure", method, url, "Bearer "+token, nil, body)
+}
 
-	resp, err := http.DefaultClient.Do(req)
+// CancelAzure asks Azure Quantum to cancel an in-flight job.
+func CancelAzure(cfg *config.AzureConfig, providerJobID string) error {
+	if cfg == nil || cfg.TenantID == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
+		return fmt.Errorf("azure: tenant_id, client_id, and client_secret are required to cancel")
+	}
+	if providerJobID == "" {
+		return fmt.Errorf("azure: provider job id is required to cancel")
+	}
+	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", cfg.TenantID)
+	if cfg.BaseURL != "" {
+		tokenURL = cfg.BaseURL + "/oauth2/v2.0/token"
+	}
+	token, err := azureAccessToken(tokenURL, cfg.ClientID, cfg.ClientSecret)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("azure: auth: %w", err)
 	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d from Azure: %s", resp.StatusCode, string(b))
+	reqURL := fmt.Sprintf("%s/jobs/%s?api-version=2022-09-12-preview", azureWorkspaceBase(cfg), providerJobID)
+	resp, err := azureDo("DELETE", reqURL, token, nil)
+	if err != nil {
+		return fmt.Errorf("azure: cancel: %w", err)
 	}
-	return resp, nil
+	resp.Body.Close()
+	return nil
 }

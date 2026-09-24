@@ -27,6 +27,12 @@ const (
 // CompileProgram generates target code from an already-lowered IR program.
 // This is the adapter contract path: Quell → IR → (optional optimize) → backend text.
 func CompileProgram(prog *ir.Program, target Target, optimize bool) (string, []string, error) {
+	return CompileProgramOpts(prog, target, optimize, optimizer.Options{})
+}
+
+// CompileProgramOpts is CompileProgram with optional coupling-aware routing.
+// When opts.Coupling is nil this is identical to CompileProgram.
+func CompileProgramOpts(prog *ir.Program, target Target, optimize bool, opts optimizer.Options) (string, []string, error) {
 	if prog == nil {
 		return "", nil, fmt.Errorf("nil program")
 	}
@@ -37,7 +43,11 @@ func CompileProgram(prog *ir.Program, target Target, optimize bool) (string, []s
 	p := prog
 	var notes []string
 	if optimize {
-		p, notes = optimizer.Optimize(prog)
+		if opts.Coupling != nil || opts.NoiseAware {
+			p, notes = optimizer.OptimizeWithOptions(prog, opts)
+		} else {
+			p, notes = optimizer.Optimize(prog)
+		}
 	}
 
 	var code string
@@ -73,6 +83,12 @@ func CompileProgram(prog *ir.Program, target Target, optimize bool) (string, []s
 func Compile(c *parser.Circuit, target Target, optimize bool) (string, []string, error) {
 	prog := ir.Lower(c)
 	return CompileProgram(prog, target, optimize)
+}
+
+// CompileOpts is Compile plus optional coupling-aware routing.
+func CompileOpts(c *parser.Circuit, target Target, optimize bool, opts optimizer.Options) (string, []string, error) {
+	prog := ir.Lower(c)
+	return CompileProgramOpts(prog, target, optimize, opts)
 }
 
 func numQubits(p *ir.Program) int {

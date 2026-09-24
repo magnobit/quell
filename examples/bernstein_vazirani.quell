@@ -1,0 +1,13 @@
+// Bernstein-Vazirani secret 11 (educational).
+// Run: quell run examples/bernstein_vazirani.quell
+// Ideal simulator: query bits lean toward 11. Hardware counts are not a SLA.
+
+X 2
+H 0
+H 1
+H 2
+CNOT 0 2
+CNOT 1 2
+H 0
+H 1
+MEASURE

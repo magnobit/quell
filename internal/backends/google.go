@@ -3,7 +3,6 @@
 package backends
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -22,9 +21,9 @@ import (
 )
 
 const (
-	googleTokenURL  = "https://oauth2.googleapis.com/token"
+	googleTokenURL    = "https://oauth2.googleapis.com/token"
 	googleQuantumBase = "https://quantumai.googleapis.com/v1alpha1"
-	googleScope     = "https://www.googleapis.com/auth/cloud-platform"
+	googleScope       = "https://www.googleapis.com/auth/cloud-platform"
 )
 
 // RunGoogle submits a circuit to the Google Quantum Computing Service
@@ -44,6 +43,10 @@ func RunGoogle(cfg *config.GCPConfig, qasm3 string) (*RunResult, error) {
 	if shots == 0 {
 		shots = 1000
 	}
+	base := googleQuantumBase
+	if cfg.BaseURL != "" {
+		base = cfg.BaseURL
+	}
 
 	// Load service account and get OAuth2 bearer token
 	token, email, err := googleAccessToken(cfg.KeyFile)
@@ -53,20 +56,21 @@ func RunGoogle(cfg *config.GCPConfig, qasm3 string) (*RunResult, error) {
 	fmt.Printf("  Google auth OK (service account: %s)\n", email)
 
 	// Upload program (circuit definition)
-	programName, err := googleCreateProgram(token, cfg.Project, qasm3)
+	programName, err := googleCreateProgram(base, token, cfg.Project, qasm3)
 	if err != nil {
 		return nil, fmt.Errorf("google: create program: %w", err)
 	}
 
 	// Create and run a job on the program
-	jobName, err := googleCreateJob(token, cfg.Project, programName, cfg.Processor, shots, cfg.Extra)
+	jobName, err := googleCreateJob(base, token, cfg.Project, programName, cfg.Processor, shots, cfg.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("google: create job: %w", err)
 	}
+	notifySubmitted(cfg.OnSubmitted, jobName)
 	fmt.Printf("  Google Quantum job created: %s\n", jobName)
 
 	// Poll until done
-	resultRaw, err := googlePoll(token, jobName)
+	resultRaw, err := googlePoll(base, token, jobName)
 	if err != nil {
 		return nil, fmt.Errorf("google: poll: %w", err)
 	}
@@ -205,9 +209,9 @@ func mustJSON(v any) []byte {
 
 // --- Google Quantum Engine API ---
 
-func googleCreateProgram(token, project, qasm3 string) (string, error) {
+func googleCreateProgram(base, token, project, qasm3 string) (string, error) {
 	// POST /projects/{project}/programs
-	url := fmt.Sprintf("%s/projects/%s/programs", googleQuantumBase, project)
+	url := fmt.Sprintf("%s/projects/%s/programs", base, project)
 
 	body, _ := json.Marshal(map[string]any{
 		"code": map[string]any{
@@ -235,9 +239,9 @@ func googleCreateProgram(token, project, qasm3 string) (string, error) {
 	return r.Name, nil
 }
 
-func googleCreateJob(token, project, programName, processor string, shots int, extra map[string]string) (string, error) {
+func googleCreateJob(base, token, project, programName, processor string, shots int, extra map[string]string) (string, error) {
 	url := fmt.Sprintf("%s/projects/%s/programs/%s/jobs",
-		googleQuantumBase, project, lastSegment(programName))
+		base, project, lastSegment(programName))
 
 	job := map[string]any{
 		"processorName": fmt.Sprintf("projects/%s/processors/%s", project, processor),
@@ -272,13 +276,13 @@ func googleCreateJob(token, project, programName, processor string, shots int, e
 	return r.Name, nil
 }
 
-func googlePoll(token, jobName string) (json.RawMessage, error) {
-	url := fmt.Sprintf("%s/%s", googleQuantumBase, jobName)
-
-	for {
+func googlePoll(base, token, jobName string) (json.RawMessage, error) {
+	url := fmt.Sprintf("%s/%s", base, jobName)
+	var result json.RawMessage
+	err := pollUntil("google", jobName, func() (pollTick, error) {
 		resp, err := googleDo("GET", url, token, nil)
 		if err != nil {
-			return nil, err
+			return pollTick{}, err
 		}
 		raw, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -287,24 +291,28 @@ func googlePoll(token, jobName string) (json.RawMessage, error) {
 			ExecutionStatus struct {
 				State string `json:"state"`
 			} `json:"executionStatus"`
-			Result json.RawMessage `json:"result"`
+			Result  json.RawMessage `json:"result"`
 			Failure struct {
 				Error string `json:"error"`
 			} `json:"failure"`
 		}
-		json.Unmarshal(raw, &r)
-
+		if json.Unmarshal(raw, &r) != nil {
+			return pollTick{}, &ProviderError{Provider: "google", Class: ClassInvalidRequest, Message: "malformed job status"}
+		}
 		switch r.ExecutionStatus.State {
 		case "SUCCESS":
-			fmt.Print("\n")
-			return r.Result, nil
+			result = r.Result
+			return pollTick{Done: true, Status: r.ExecutionStatus.State}, nil
 		case "FAILURE", "CANCELLED":
-			return nil, fmt.Errorf("job %s: %s", jobName, r.Failure.Error)
+			return pollTick{Failed: true, Status: r.ExecutionStatus.State, Message: r.Failure.Error}, nil
 		default:
-			fmt.Printf("\r  Google Quantum job: %-12s", r.ExecutionStatus.State)
-			time.Sleep(5 * time.Second)
+			return pollTick{Status: r.ExecutionStatus.State}, nil
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
+	return result, nil
 }
 
 func googleParseResult(raw json.RawMessage, shots int) (map[string]int, error) {
@@ -318,7 +326,7 @@ func googleParseResult(raw json.RawMessage, shots int) (map[string]int, error) {
 		SweepResults []struct {
 			ParameterizedResults []struct {
 				MeasurementResults []struct {
-					Key                    string `json:"key"`
+					Key                     string `json:"key"`
 					QubitMeasurementResults []struct {
 						Results string `json:"results"` // base64 packed bits, 1 bit/shot
 					} `json:"qubitMeasurementResults"`
@@ -392,31 +400,34 @@ func googleDecodeBits(b64 string, numShots int) ([]byte, error) {
 }
 
 func googleDo(method, url, token string, body []byte) (*http.Response, error) {
-	var r io.Reader
-	if body != nil {
-		r = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, url, r)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d from Google: %s", resp.StatusCode, string(b))
-	}
-	return resp, nil
+	return doJSON("google", method, url, "Bearer "+token, nil, body)
 }
 
 func lastSegment(name string) string {
 	parts := strings.Split(name, "/")
 	return parts[len(parts)-1]
+}
+
+// CancelGoogle asks Google Quantum Engine to cancel an in-flight job.
+func CancelGoogle(cfg *config.GCPConfig, providerJobID string) error {
+	if cfg == nil || cfg.KeyFile == "" {
+		return fmt.Errorf("google: key_file is required to cancel")
+	}
+	if providerJobID == "" {
+		return fmt.Errorf("google: provider job id is required to cancel")
+	}
+	base := googleQuantumBase
+	if cfg.BaseURL != "" {
+		base = cfg.BaseURL
+	}
+	token, _, err := googleAccessToken(cfg.KeyFile)
+	if err != nil {
+		return fmt.Errorf("google: auth: %w", err)
+	}
+	resp, err := googleDo("POST", base+"/"+strings.TrimPrefix(providerJobID, "/")+":cancel", token, nil)
+	if err != nil {
+		return fmt.Errorf("google: cancel: %w", err)
+	}
+	resp.Body.Close()
+	return nil
 }

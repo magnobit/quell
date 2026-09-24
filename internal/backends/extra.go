@@ -21,6 +21,15 @@ func mergeExtra(body map[string]any, extra map[string]string) {
 	}
 }
 
+// notifySubmitted fires a hosted-caller's submit hook so the provider job
+// id can be persisted before poll starts — cancel needs that id while the
+// job is still running.
+func notifySubmitted(fn func(string), jobID string) {
+	if fn != nil && jobID != "" {
+		fn(jobID)
+	}
+}
+
 func coerceExtraValue(s string) any {
 	if b, err := strconv.ParseBool(s); err == nil {
 		return b

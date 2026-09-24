@@ -75,6 +75,34 @@ func FullyConnected(n int) *CouplingMap {
 	return New("fully-connected-"+itoa(n), edges)
 }
 
+// FromEdges is the single Provider/Scheduler → Optimizer conversion.
+// edges is the coupling list stored on scheduler_backends / telemetry
+// (pairs of qubit indices). Empty or nil means unknown topology — never
+// a fully-connected fabric and never a rejection. name labels routing
+// notes; do not pass a Preset name (linear-N, heavyhex-toy,
+// fully-connected-N) for live provider data.
+func FromEdges(name string, edges [][2]int) *CouplingMap {
+	if len(edges) == 0 {
+		return nil
+	}
+	if name == "" {
+		name = "backend"
+	}
+	return New(name, edges)
+}
+
+// AllToAll is a named complete graph — used when a backend's execution
+// model is all-to-all (e.g. trapped-ion). Distinct from Preset
+// "fully-connected-N": this name is caller-supplied so a live/architectural
+// map cannot be mistaken for a CLI teaching preset.
+func AllToAll(name string, n int) *CouplingMap {
+	m := FullyConnected(n)
+	if name != "" {
+		m.Name = name
+	}
+	return m
+}
+
 // New builds a CouplingMap and adjacency list.
 func New(name string, edges [][2]int) *CouplingMap {
 	m := &CouplingMap{Name: name, Edges: edges, adj: map[int][]int{}}

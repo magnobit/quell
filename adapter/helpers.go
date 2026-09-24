@@ -8,6 +8,8 @@ import (
 	"github.com/magnobit/quell/internal/compiler"
 	"github.com/magnobit/quell/internal/config"
 	"github.com/magnobit/quell/internal/ir"
+	"github.com/magnobit/quell/internal/optimizer"
+	"github.com/magnobit/quell/internal/topology"
 )
 
 func programQASM(job *Job) (qasm string, nq int, err error) {
@@ -17,7 +19,11 @@ func programQASM(job *Job) (qasm string, nq int, err error) {
 	if ir.NeedsBind(job.Program) {
 		return "", 0, fmt.Errorf("adapter: unbound parameters %v", ir.UnboundParams(job.Program))
 	}
-	code, _, err := compiler.CompileProgram(job.Program, compiler.TargetOpenQASM, job.Optimize)
+	optOpts := optimizer.Options{}
+	if len(job.Coupling) > 0 {
+		optOpts.Coupling = topology.FromEdges(job.CouplingName, job.Coupling)
+	}
+	code, _, err := compiler.CompileProgramOpts(job.Program, compiler.TargetOpenQASM, job.Optimize, optOpts)
 	if err != nil {
 		return "", 0, err
 	}

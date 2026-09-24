@@ -43,6 +43,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAskCmd())
 	root.AddCommand(newConvertCmd())
 	root.AddCommand(newEstimateCmd())
+	root.AddCommand(newBackendsCmd())
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print the quell version",

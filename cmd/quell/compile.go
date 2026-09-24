@@ -7,14 +7,20 @@ import (
 	"os"
 	"strings"
 
+	"encoding/json"
+
+	"github.com/magnobit/quell/compile"
 	"github.com/magnobit/quell/internal/compiler"
+	"github.com/magnobit/quell/internal/ir"
+	"github.com/magnobit/quell/internal/optequiv"
 	"github.com/magnobit/quell/internal/parser"
 	"github.com/spf13/cobra"
 )
 
 func newCompileCmd() *cobra.Command {
 	var target, outFile string
-	var optimize, noOptimize bool
+	var optimize, noOptimize, verifyOptimization bool
+	var paramFlags []string
 
 	cmd := &cobra.Command{
 		Use:   "compile <file.quell>",
@@ -22,7 +28,8 @@ func newCompileCmd() *cobra.Command {
 		Example: `  quell compile bell.quell
   quell compile --target qiskit bell.quell
   quell compile --target qsharp bell.quell
-  quell compile --target cirq --no-optimize -o out.py bell.quell`,
+  quell compile --target cirq --no-optimize -o out.py bell.quell
+  quell compile --verify-optimization bell.quell`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !strings.HasSuffix(args[0], ".quell") {
@@ -35,12 +42,49 @@ func newCompileCmd() *cobra.Command {
 				return fmt.Errorf("parse error: %w", err)
 			}
 
+			params, err := parseParamFlags(paramFlags)
+			if err != nil {
+				return err
+			}
+			prog := ir.Lower(circ)
+			if len(params) > 0 || ir.NeedsBind(prog) {
+				bound, berr := ir.Bind(prog, params)
+				if berr != nil && verifyOptimization {
+					ev := optequiv.VerifyOptimization(prog, optequiv.Options{Params: params, OptimizerVersion: compile.BuildIdentity().PinnedOptimizer()})
+					writeEquiv(ev)
+					return fmt.Errorf("optimizer verification: %s", ev.Status)
+				}
+				if berr != nil {
+					return fmt.Errorf("compile error: %w", berr)
+				}
+				prog = bound
+			}
+
 			finalOptimize := optimize
 			if noOptimize {
 				finalOptimize = false
 			}
 
-			out, notes, err := compiler.Compile(circ, compiler.Target(target), finalOptimize)
+			useOptimized := finalOptimize
+			var ev optequiv.Evidence
+			var verified bool
+			if verifyOptimization && finalOptimize {
+				ev = optequiv.VerifyOptimization(prog, optequiv.Options{
+					Params:           params,
+					OptimizerVersion: compile.BuildIdentity().PinnedOptimizer(),
+				})
+				verified = true
+				writeEquiv(ev)
+				switch ev.Status {
+				case optequiv.StatusNotEquivalent:
+					useOptimized = false
+					fmt.Fprintln(os.Stderr, "Optimizer verification failed — compiling the original unoptimized IR.")
+				case optequiv.StatusUnsupported, optequiv.StatusInconclusive:
+					fmt.Fprintf(os.Stderr, "Optimizer verification %s — compiling optimized IR without claiming equivalence.\n", ev.Status)
+				}
+			}
+
+			out, notes, err := compiler.CompileProgram(prog, compiler.Target(target), useOptimized)
 			if err != nil {
 				return fmt.Errorf("compile error: %w", err)
 			}
@@ -54,9 +98,12 @@ func newCompileCmd() *cobra.Command {
 					return fmt.Errorf("write error: %w", err)
 				}
 				fmt.Printf("Written to %s\n", outFile)
-				return nil
+			} else {
+				fmt.Println(out)
 			}
-			fmt.Println(out)
+			if verified && ev.Status == optequiv.StatusNotEquivalent {
+				return fmt.Errorf("optimizer verification: NOT_EQUIVALENT")
+			}
 			return nil
 		},
 	}
@@ -66,6 +113,17 @@ func newCompileCmd() *cobra.Command {
 	f.StringVarP(&outFile, "output", "o", "", "write compiled output to file instead of stdout")
 	f.BoolVar(&optimize, "optimize", true, "enable the IR optimizer (default)")
 	f.BoolVar(&noOptimize, "no-optimize", false, "disable the IR optimizer")
+	f.BoolVar(&verifyOptimization, "verify-optimization", false, "compare original vs optimized IR (exact when possible); fall back to unoptimized IR on NOT_EQUIVALENT")
+	f.StringArrayVar(&paramFlags, "param", nil, "bind symbolic angle: --param theta=1.5708 (repeatable)")
 
 	return cmd
+}
+
+func writeEquiv(ev optequiv.Evidence) {
+	b, err := json.MarshalIndent(ev, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "optimizer verification: %s (%s)\n", ev.Status, ev.Reason)
+		return
+	}
+	fmt.Fprintln(os.Stderr, string(b))
 }

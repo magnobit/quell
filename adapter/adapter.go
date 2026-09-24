@@ -30,6 +30,10 @@ type Job struct {
 	QuellSource string
 	// Noise is only used by the simulator adapter.
 	Noise any // *simulate.NoiseModel or simulate.NoiseModel — kept any to avoid cycles in docs
+	// Coupling is the selected backend's edge list. Empty keeps generic
+	// Optimize. Name labels routing notes (live backend id, not a preset).
+	Coupling     [][2]int
+	CouplingName string
 }
 
 // BackendAdapter is the contract every backend must implement.
