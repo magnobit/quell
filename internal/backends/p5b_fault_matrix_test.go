@@ -5,7 +5,6 @@ package backends
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -56,7 +55,7 @@ func TestP5B_IBM_FaultMatrix_ContractOnly(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := newIBMServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if c.status >= 400 {
 					w.WriteHeader(c.status)
 					_, _ = w.Write([]byte(c.body))
@@ -65,7 +64,7 @@ func TestP5B_IBM_FaultMatrix_ContractOnly(t *testing.T) {
 				_, _ = w.Write([]byte(c.body))
 			}))
 			defer srv.Close()
-			cfg := &config.IBMConfig{Token: "tok-secret", Device: "ibm_test", BaseURL: srv.URL}
+			cfg := &config.IBMConfig{Token: "tok-secret", Device: "ibm_test", Instance: testIBMCRN, BaseURL: srv.URL}
 			_, err := RunIBM(cfg, "OPENQASM 3;", 1)
 			if err == nil {
 				t.Fatal("expected error")

@@ -47,7 +47,7 @@ func TestRunIBM_AuthErrorClassAndNoSecret(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.IBMConfig{Token: "leaked-token", Device: "ibm_test", BaseURL: srv.URL}
+	cfg := &config.IBMConfig{Token: "leaked-token", Device: "ibm_test", Instance: testIBMCRN, BaseURL: srv.URL}
 	_, err := RunIBM(cfg, "OPENQASM 3;", 1)
 	if err == nil {
 		t.Fatal("expected auth error")
@@ -67,7 +67,7 @@ func TestRunIBM_RateLimitClassified(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.IBMConfig{Token: "tok", Device: "ibm_test", BaseURL: srv.URL}
+	cfg := &config.IBMConfig{Token: "tok", Device: "ibm_test", Instance: testIBMCRN, BaseURL: srv.URL}
 	_, err := RunIBM(cfg, "OPENQASM 3;", 1)
 	if err == nil {
 		t.Fatal("expected rate limit error")
@@ -86,9 +86,9 @@ func TestRunIBM_PollTimeoutDoesNotClaimCancel(t *testing.T) {
 		pollTimeout = oldT
 	}()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/runtime/jobs":
+		case r.Method == "POST" && r.URL.Path == "/api/v1/jobs":
 			w.Write([]byte(`{"id": "job-timeout-1"}`))
 		default:
 			w.Write([]byte(`{"status": "Queued"}`))
@@ -96,7 +96,7 @@ func TestRunIBM_PollTimeoutDoesNotClaimCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.IBMConfig{Token: "tok", Device: "ibm_test", BaseURL: srv.URL}
+	cfg := &config.IBMConfig{Token: "tok", Device: "ibm_test", Instance: testIBMCRN, BaseURL: srv.URL}
 	_, err := RunIBM(cfg, "OPENQASM 3;", 1)
 	if err == nil {
 		t.Fatal("expected poll timeout")

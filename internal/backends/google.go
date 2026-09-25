@@ -22,7 +22,7 @@ import (
 
 const (
 	googleTokenURL    = "https://oauth2.googleapis.com/token"
-	googleQuantumBase = "https://quantumai.googleapis.com/v1alpha1"
+	googleQuantumBase = "https://quantum.googleapis.com/v1alpha1"
 	googleScope       = "https://www.googleapis.com/auth/cloud-platform"
 )
 

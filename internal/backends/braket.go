@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -57,18 +58,19 @@ func RunBraket(cfg *config.AWSConfig, qasm3 string) (*RunResult, error) {
 	}
 
 	creds := awsCreds{accessKey, secretKey, sessionToken}
-	taskArn, s3Bucket, s3Dir, err := braketSubmit(cfg, creds, qasm3, shots)
+	taskArn, err := braketSubmit(cfg, creds, qasm3, shots)
 	if err != nil {
 		return nil, fmt.Errorf("braket: submit: %w", err)
 	}
 	notifySubmitted(cfg.OnSubmitted, taskArn)
 	fmt.Printf("  Braket task submitted: %s\n", taskArn)
 
-	if err := braketPoll(cfg, creds, taskArn); err != nil {
+	s3Bucket, s3Dir, err := braketPoll(cfg, creds, taskArn)
+	if err != nil {
 		return nil, fmt.Errorf("braket: %w", err)
 	}
 
-	counts, err := braketResults(cfg, creds, s3Bucket, s3Dir)
+	counts, err := braketResults(cfg, creds, s3Bucket, s3Dir, shots)
 	if err != nil {
 		return nil, fmt.Errorf("braket: results: %w", err)
 	}
@@ -96,7 +98,7 @@ type awsCreds struct {
 	SessionToken    string
 }
 
-func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int) (taskArn, s3Bucket, s3Dir string, err error) {
+func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int) (string, error) {
 	endpoint := braketEndpoint(cfg)
 
 	// The action field must be a JSON-encoded string (doubly serialised)
@@ -110,7 +112,12 @@ func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int
 	}
 	actionJSON, _ := json.Marshal(action)
 
+	clientToken, err := newUUID()
+	if err != nil {
+		return "", err
+	}
 	payload := map[string]any{
+		"clientToken":       clientToken,
 		"deviceArn":         cfg.Device,
 		"shots":             shots,
 		"outputS3Bucket":    cfg.S3Bucket,
@@ -122,34 +129,38 @@ func braketSubmit(cfg *config.AWSConfig, creds awsCreds, qasm3 string, shots int
 
 	resp, err := awsDo("POST", endpoint+"/quantum-task", cfg.Region, "braket", creds, body)
 	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
 	defer resp.Body.Close()
 
+	// CreateQuantumTask returns only the ARN; the results location comes
+	// from GetQuantumTask while polling.
 	var r struct {
-		QuantumTaskArn    string `json:"quantumTaskArn"`
-		OutputS3Bucket    string `json:"outputS3Bucket"`
-		OutputS3Directory string `json:"outputS3Directory"`
+		QuantumTaskArn string `json:"quantumTaskArn"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", "", "", err
+		return "", err
 	}
 	if r.QuantumTaskArn == "" {
-		return "", "", "", fmt.Errorf("no task ARN in response")
+		return "", fmt.Errorf("no task ARN in response")
 	}
-	return r.QuantumTaskArn, r.OutputS3Bucket, r.OutputS3Directory, nil
+	return r.QuantumTaskArn, nil
 }
 
-func braketPoll(cfg *config.AWSConfig, creds awsCreds, taskArn string) error {
-	endpoint := fmt.Sprintf("%s/quantum-task/%s", braketEndpoint(cfg), url.PathEscape(taskArn))
-	return pollUntil("aws", taskArn, func() (pollTick, error) {
+// braketPoll waits for the task to finish and returns where its results
+// were written.
+func braketPoll(cfg *config.AWSConfig, creds awsCreds, taskArn string) (bucket, directory string, err error) {
+	endpoint := braketEndpoint(cfg) + "/quantum-task/" + awsEscapeSegment(taskArn)
+	err = pollUntil("aws", taskArn, func() (pollTick, error) {
 		resp, err := awsDo("GET", endpoint, cfg.Region, "braket", creds, nil)
 		if err != nil {
 			return pollTick{}, err
 		}
 		var r struct {
-			Status        string `json:"status"`
-			FailureReason string `json:"failureReason"`
+			Status            string `json:"status"`
+			FailureReason     string `json:"failureReason"`
+			OutputS3Bucket    string `json:"outputS3Bucket"`
+			OutputS3Directory string `json:"outputS3Directory"`
 		}
 		decErr := json.NewDecoder(resp.Body).Decode(&r)
 		resp.Body.Close()
@@ -158,6 +169,7 @@ func braketPoll(cfg *config.AWSConfig, creds awsCreds, taskArn string) error {
 		}
 		switch r.Status {
 		case "COMPLETED":
+			bucket, directory = r.OutputS3Bucket, r.OutputS3Directory
 			return pollTick{Done: true, Status: r.Status}, nil
 		case "FAILED", "CANCELLED":
 			return pollTick{Failed: true, Status: r.Status, Message: r.FailureReason}, nil
@@ -165,9 +177,22 @@ func braketPoll(cfg *config.AWSConfig, creds awsCreds, taskArn string) error {
 			return pollTick{Status: r.Status}, nil
 		}
 	})
+	if err == nil && (bucket == "" || directory == "") {
+		bucket, directory = cfg.S3Bucket, strings.TrimSuffix(cfg.S3Prefix, "/")+"/"+taskIDFromArn(taskArn)
+	}
+	return bucket, directory, err
 }
 
-func braketResults(cfg *config.AWSConfig, creds awsCreds, bucket, directory string) (map[string]int, error) {
+// taskIDFromArn returns the id after "quantum-task/" in a task ARN; Braket
+// names the results directory {prefix}/{id} by default.
+func taskIDFromArn(arn string) string {
+	if i := strings.LastIndex(arn, "/"); i >= 0 {
+		return arn[i+1:]
+	}
+	return arn
+}
+
+func braketResults(cfg *config.AWSConfig, creds awsCreds, bucket, directory string, shots int) (map[string]int, error) {
 	// Results are in s3://{bucket}/{directory}/results.json
 	var s3URL string
 	if cfg.BaseURL != "" {
@@ -211,12 +236,10 @@ func braketResults(cfg *config.AWSConfig, creds awsCreds, bucket, directory stri
 		return counts, nil
 	}
 
-	// Fallback: use measurementProbabilities × totalShots
+	// Fallback: measurementProbabilities × requested shots.
 	if len(result.MeasurementProbabilities) > 0 {
-		// sum probabilities to get total shots implicitly
-		total := len(result.Measurements)
 		for k, p := range result.MeasurementProbabilities {
-			counts[k] = int(p * float64(total))
+			counts[k] = int(math.Round(p * float64(shots)))
 		}
 		return counts, nil
 	}
@@ -251,8 +274,13 @@ func CancelBraket(cfg *config.AWSConfig, providerJobID string) error {
 		cfg.Region = "us-east-1"
 	}
 	creds := awsCreds{accessKey, secretKey, sessionToken}
-	endpoint := fmt.Sprintf("%s/quantum-task/%s/cancel", braketEndpoint(cfg), url.PathEscape(providerJobID))
-	resp, err := awsDo("PUT", endpoint, cfg.Region, "braket", creds, []byte(`{}`))
+	endpoint := braketEndpoint(cfg) + "/quantum-task/" + awsEscapeSegment(providerJobID) + "/cancel"
+	clientToken, err := newUUID()
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"clientToken": clientToken})
+	resp, err := awsDo("PUT", endpoint, cfg.Region, "braket", creds, body)
 	if err != nil {
 		return fmt.Errorf("braket: cancel: %w", err)
 	}
@@ -314,7 +342,7 @@ func awsDo(method, rawURL, region, service string, creds awsCreds, body []byte) 
 
 	canonReq := strings.Join([]string{
 		method,
-		u.EscapedPath(),
+		awsCanonicalPath(u.EscapedPath(), service),
 		canonQuery,
 		canonHeaders,
 		signedHeaders,
@@ -359,4 +387,41 @@ func sha256hexBytes(b []byte) string {
 
 func sha256hexStr(s string) string {
 	return sha256hexBytes([]byte(s))
+}
+
+// awsEscapeSegment URI-encodes one path segment the way SigV4 does: every
+// byte except A-Z a-z 0-9 - _ . ~ becomes %XX. Use it for values such as
+// task ARNs that contain ':' and '/'.
+func awsEscapeSegment(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// awsCanonicalPath builds the SigV4 canonical URI from the path as sent.
+// Every service except S3 encodes each segment twice; S3 encodes once.
+func awsCanonicalPath(escapedPath, service string) string {
+	if escapedPath == "" {
+		return "/"
+	}
+	segs := strings.Split(escapedPath, "/")
+	for i, seg := range segs {
+		dec, err := url.PathUnescape(seg)
+		if err != nil {
+			dec = seg
+		}
+		enc := awsEscapeSegment(dec)
+		if service != "s3" {
+			enc = awsEscapeSegment(enc)
+		}
+		segs[i] = enc
+	}
+	return strings.Join(segs, "/")
 }

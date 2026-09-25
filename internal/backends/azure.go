@@ -3,30 +3,34 @@
 package backends
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/magnobit/quell/internal/config"
 )
 
-const azureScope = "https://quantum.microsoft.com/.default"
+const (
+	azureScope      = "https://quantum.microsoft.com/.default"
+	azureAPIVersion = "2026-01-15-preview"
+)
+
+// azureFormats holds the input and output formats for providers whose
+// Azure targets accept OpenQASM text. Other providers take QIR or their own
+// JSON circuit formats, which Quell does not emit yet.
+var azureFormats = map[string][2]string{
+	"quantinuum": {"honeywell.openqasm.v1", "honeywell.quantum-results.v1"},
+}
 
 // RunAzure submits a circuit to Azure Quantum and returns measurement counts.
-// Auth uses the AAD OAuth2 client-credentials flow (service principal),
-// mirroring the JWT/token-exchange shape already used for Google service
-// accounts in google.go's googleAccessToken.
-//
-// Note: a production Azure Quantum integration normally uploads the
-// compiled circuit to an Azure Blob Storage container first and references
-// it by SAS URI in the job-create request, rather than inlining the source.
-// This adapter inlines qasm3 directly to keep the same submit → poll →
-// results shape as the other backends in this package; a real deployment
-// would add a blob-upload step ahead of azureSubmit.
+// Auth uses the AAD client-credentials flow (service principal). Following
+// the data-plane contract, the circuit is uploaded to the workspace's
+// storage through a SAS URL and the job references it by URI.
 func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 	if cfg.TenantID == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
 		return nil, fmt.Errorf("azure: tenant_id, client_id, and client_secret are required (azure.* in quell.config.yml)")
@@ -34,36 +38,56 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 	if cfg.SubscriptionID == "" || cfg.ResourceGroup == "" || cfg.Workspace == "" {
 		return nil, fmt.Errorf("azure: subscription_id, resource_group, and workspace are required")
 	}
+	if cfg.Location == "" && cfg.BaseURL == "" {
+		return nil, fmt.Errorf("azure: location is required (the workspace region, e.g. eastus)")
+	}
 	if cfg.Target == "" {
-		return nil, fmt.Errorf("azure: target is required (e.g. ionq.simulator, quantinuum.sim.h1-1sc)")
+		return nil, fmt.Errorf("azure: target is required (e.g. quantinuum.sim.h2-1e)")
 	}
 	shots := cfg.Shots
 	if shots == 0 {
 		shots = 500
 	}
-
-	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", cfg.TenantID)
-	if cfg.BaseURL != "" {
-		tokenURL = cfg.BaseURL + "/oauth2/v2.0/token"
+	providerID := strings.SplitN(cfg.Target, ".", 2)[0]
+	extra := make(map[string]string, len(cfg.Extra))
+	for k, v := range cfg.Extra {
+		extra[k] = v
 	}
-	token, err := azureAccessToken(tokenURL, cfg.ClientID, cfg.ClientSecret)
+	formats := azureFormats[providerID]
+	if v, ok := extra["inputDataFormat"]; ok {
+		formats[0] = v
+		delete(extra, "inputDataFormat")
+	}
+	if v, ok := extra["outputDataFormat"]; ok {
+		formats[1] = v
+		delete(extra, "outputDataFormat")
+	}
+	if formats[0] == "" {
+		return nil, fmt.Errorf("azure: %s targets do not accept OpenQASM; set extra inputDataFormat if this target takes a text circuit format", providerID)
+	}
+	if formats[1] == "" {
+		formats[1] = "microsoft.quantum-results.v1"
+	}
+
+	token, err := azureAccessToken(azureTokenURL(cfg), cfg.ClientID, cfg.ClientSecret)
 	if err != nil {
 		return nil, fmt.Errorf("azure: auth: %w", err)
 	}
 	fmt.Println("  Azure AAD auth OK")
 
-	jobID, err := azureSubmit(token, cfg, qasm3, shots)
+	jobID, err := azureSubmit(token, cfg, providerID, formats, qasm3, shots, extra)
 	if err != nil {
 		return nil, fmt.Errorf("azure: submit: %w", err)
 	}
 	notifySubmitted(cfg.OnSubmitted, jobID)
 	fmt.Printf("  Azure Quantum job submitted: %s\n", jobID)
 
-	if err := azurePoll(token, cfg, jobID); err != nil {
+	outputURI, err := azurePoll(token, cfg, jobID)
+	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
 
-	counts, err := azureResults(token, cfg, jobID)
+	counts, err := azureResults(outputURI, shots)
 	if err != nil {
 		return nil, fmt.Errorf("azure: results: %w", err)
 	}
@@ -74,6 +98,13 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 		Shots:   shots,
 		Counts:  counts,
 	}, nil
+}
+
+func azureTokenURL(cfg *config.AzureConfig) string {
+	if cfg.BaseURL != "" {
+		return strings.TrimRight(cfg.BaseURL, "/") + "/oauth2/v2.0/token"
+	}
+	return "https://login.microsoftonline.com/" + url.PathEscape(cfg.TenantID) + "/oauth2/v2.0/token"
 }
 
 // azureAccessToken exchanges AAD service-principal credentials for a bearer
@@ -108,51 +139,96 @@ func azureAccessToken(tokenURL, clientID, clientSecret string) (string, error) {
 	return tok.AccessToken, nil
 }
 
+// azureWorkspaceBase is the regional data-plane URL of the workspace.
 func azureWorkspaceBase(cfg *config.AzureConfig) string {
+	host := "https://" + cfg.Location + ".quantum.azure.com"
 	if cfg.BaseURL != "" {
-		return cfg.BaseURL
+		host = strings.TrimRight(cfg.BaseURL, "/")
 	}
-	return fmt.Sprintf("https://management.azure.com/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Quantum/workspaces/%s",
-		cfg.SubscriptionID, cfg.ResourceGroup, cfg.Workspace)
+	return fmt.Sprintf("%s/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Quantum/workspaces/%s",
+		host, url.PathEscape(cfg.SubscriptionID), url.PathEscape(cfg.ResourceGroup), url.PathEscape(cfg.Workspace))
 }
 
-func azureSubmit(token string, cfg *config.AzureConfig, qasm3 string, shots int) (string, error) {
-	jobID := fmt.Sprintf("quell-%d", time.Now().UnixNano())
-	reqURL := fmt.Sprintf("%s/jobs/%s?api-version=2022-09-12-preview", azureWorkspaceBase(cfg), jobID)
+func azureJobURL(cfg *config.AzureConfig, jobID string) string {
+	return azureWorkspaceBase(cfg) + "/jobs/" + url.PathEscape(jobID) + "?api-version=" + azureAPIVersion
+}
 
-	// Real Azure Quantum targets expect a provider-specific input format
-	// (e.g. "honeywell.openqasm.v1", "ionq.circuit.v1", "rigetti.openqasm.v1")
-	// chosen to match cfg.Target's provider. Quell always emits OpenQASM 3,
-	// so this generic value is a placeholder — override it per-target with
-	// `--set azure.inputDataFormat=ionq.circuit.v1` (or the config file's
-	// `azure.extra.inputDataFormat`) until the provider-specific mapping is
-	// built in.
-	inputDataFormat := "honeywell.openqasm.v1"
-	extra := make(map[string]string, len(cfg.Extra))
-	for k, v := range cfg.Extra {
-		extra[k] = v
+// azureSASURI asks the workspace for a SAS URL to a container (blob == "")
+// or a blob in it. This API version creates the container when missing.
+func azureSASURI(token string, cfg *config.AzureConfig, container, blob string) (string, error) {
+	req := map[string]string{"containerName": container}
+	if blob != "" {
+		req["blobName"] = blob
 	}
-	if v, ok := extra["inputDataFormat"]; ok {
-		inputDataFormat = v
-		delete(extra, "inputDataFormat")
+	body, _ := json.Marshal(req)
+	resp, err := azureDo("POST", azureWorkspaceBase(cfg)+"/storage/sasUri?api-version="+azureAPIVersion, token, body)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var r struct {
+		SasURI string `json:"sasUri"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil || r.SasURI == "" {
+		return "", fmt.Errorf("no SAS URI returned for %s", container)
+	}
+	return r.SasURI, nil
+}
+
+func azureUploadBlob(sasURI string, data []byte) error {
+	req, err := http.NewRequest(http.MethodPut, sasURI, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("x-ms-blob-type", "BlockBlob")
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := providerHTTPClient.Do(req)
+	if err != nil {
+		return &ProviderError{Provider: "azure", Class: classifyNet(err), Message: "upload input: " + redactSecrets(err.Error())}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return httpStatusError("azure", resp.StatusCode, b)
+	}
+	return nil
+}
+
+func azureSubmit(token string, cfg *config.AzureConfig, providerID string, formats [2]string, qasm3 string, shots int, extra map[string]string) (string, error) {
+	jobID, err := newUUID()
+	if err != nil {
+		return "", err
+	}
+	container := "job-" + jobID
+	inputURI, err := azureSASURI(token, cfg, container, "inputData")
+	if err != nil {
+		return "", err
+	}
+	if err := azureUploadBlob(inputURI, []byte(qasm3)); err != nil {
+		return "", err
+	}
+	containerURI, err := azureSASURI(token, cfg, container, "")
+	if err != nil {
+		return "", err
 	}
 
-	inputParams := map[string]any{
-		"shots": shots,
-	}
+	inputParams := map[string]any{"shots": shots, "count": shots}
 	mergeExtra(inputParams, extra)
 
 	body, _ := json.Marshal(map[string]any{
 		"id":               jobID,
-		"target":           cfg.Target,
 		"name":             "quell-job",
-		"inputDataFormat":  inputDataFormat,
-		"outputDataFormat": "microsoft.quantum-results.v1",
+		"itemType":         "Job",
+		"providerId":       providerID,
+		"target":           cfg.Target,
+		"containerUri":     containerURI,
+		"inputDataUri":     inputURI,
+		"inputDataFormat":  formats[0],
+		"outputDataFormat": formats[1],
 		"inputParams":      inputParams,
-		"inputData":        qasm3,
 	})
 
-	resp, err := azureDo("PUT", reqURL, token, body)
+	resp, err := azureDo("PUT", azureJobURL(cfg, jobID), token, body)
 	if err != nil {
 		return "", err
 	}
@@ -163,23 +239,23 @@ func azureSubmit(token string, cfg *config.AzureConfig, qasm3 string, shots int)
 	}
 	json.NewDecoder(resp.Body).Decode(&r)
 	if r.ID == "" {
-		// Azure's create-job PUT sometimes echoes no body on success — fall
-		// back to the id we generated and sent in the request.
 		return jobID, nil
 	}
 	return r.ID, nil
 }
 
-func azurePoll(token string, cfg *config.AzureConfig, jobID string) error {
-	reqURL := fmt.Sprintf("%s/jobs/%s?api-version=2022-09-12-preview", azureWorkspaceBase(cfg), jobID)
-	return pollUntil("azure", jobID, func() (pollTick, error) {
-		resp, err := azureDo("GET", reqURL, token, nil)
+// azurePoll waits for the job to finish and returns its output blob URI.
+func azurePoll(token string, cfg *config.AzureConfig, jobID string) (string, error) {
+	var outputURI string
+	err := pollUntil("azure", jobID, func() (pollTick, error) {
+		resp, err := azureDo("GET", azureJobURL(cfg, jobID), token, nil)
 		if err != nil {
 			return pollTick{}, err
 		}
 		var r struct {
-			Status    string `json:"status"`
-			ErrorData struct {
+			Status        string `json:"status"`
+			OutputDataURI string `json:"outputDataUri"`
+			ErrorData     struct {
 				Message string `json:"message"`
 			} `json:"errorData"`
 		}
@@ -189,7 +265,8 @@ func azurePoll(token string, cfg *config.AzureConfig, jobID string) error {
 			return pollTick{}, &ProviderError{Provider: "azure", Class: ClassInvalidRequest, Message: "malformed job status"}
 		}
 		switch r.Status {
-		case "Succeeded":
+		case "Succeeded", "Completed":
+			outputURI = r.OutputDataURI
 			return pollTick{Done: true, Status: r.Status}, nil
 		case "Failed", "Cancelled":
 			return pollTick{Failed: true, Status: r.Status, Message: r.ErrorData.Message}, nil
@@ -197,38 +274,62 @@ func azurePoll(token string, cfg *config.AzureConfig, jobID string) error {
 			return pollTick{Status: r.Status}, nil
 		}
 	})
+	if err == nil && outputURI == "" {
+		return "", fmt.Errorf("job finished without an output data URI")
+	}
+	return outputURI, err
 }
 
-func azureResults(token string, cfg *config.AzureConfig, jobID string) (map[string]int, error) {
-	reqURL := fmt.Sprintf("%s/jobs/%s?api-version=2022-09-12-preview", azureWorkspaceBase(cfg), jobID)
-	resp, err := azureDo("GET", reqURL, token, nil)
+// azureResults downloads the output blob. Providers write either a
+// histogram (counts or probabilities) or per-register lists of shot
+// bitstrings (Quantinuum).
+func azureResults(outputURI string, shots int) (map[string]int, error) {
+	resp, err := providerHTTPClient.Get(outputURI)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch results blob: %s", redactSecrets(err.Error()))
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, httpStatusError("azure", resp.StatusCode, raw)
+	}
+	return parseAzureResults(raw, shots)
+}
 
-	var r struct {
-		OutputDataURI string `json:"outputDataUri"`
+func parseAzureResults(raw []byte, shots int) (map[string]int, error) {
+	var hist struct {
+		Histogram map[string]float64 `json:"histogram"`
 	}
-	if err := json.Unmarshal(raw, &r); err != nil || r.OutputDataURI == "" {
-		return nil, fmt.Errorf("no output data URI in job response: %s", string(raw))
+	if json.Unmarshal(raw, &hist) == nil && len(hist.Histogram) > 0 {
+		sum := 0.0
+		for _, v := range hist.Histogram {
+			sum += v
+		}
+		counts := make(map[string]int, len(hist.Histogram))
+		probabilities := sum > 0 && sum <= 1.0001
+		for k, v := range hist.Histogram {
+			if probabilities {
+				counts[k] = int(math.Round(v * float64(shots)))
+			} else {
+				counts[k] = int(math.Round(v))
+			}
+		}
+		return counts, nil
 	}
-
-	resultResp, err := http.Get(r.OutputDataURI)
-	if err != nil {
-		return nil, fmt.Errorf("fetch results blob: %w", err)
+	var regs map[string][]string
+	if json.Unmarshal(raw, &regs) == nil && len(regs) > 0 {
+		counts := map[string]int{}
+		for _, shotsList := range regs {
+			for _, bits := range shotsList {
+				counts[bits]++
+			}
+			break
+		}
+		if len(counts) > 0 {
+			return counts, nil
+		}
 	}
-	defer resultResp.Body.Close()
-	resultRaw, _ := io.ReadAll(resultResp.Body)
-
-	var out struct {
-		Histogram map[string]int `json:"histogram"`
-	}
-	if err := json.Unmarshal(resultRaw, &out); err != nil || out.Histogram == nil {
-		return nil, fmt.Errorf("unrecognised result format: %s", string(resultRaw))
-	}
-	return out.Histogram, nil
+	return nil, fmt.Errorf("unrecognised result format: %s", string(raw))
 }
 
 func azureDo(method, url, token string, body []byte) (*http.Response, error) {
@@ -243,16 +344,11 @@ func CancelAzure(cfg *config.AzureConfig, providerJobID string) error {
 	if providerJobID == "" {
 		return fmt.Errorf("azure: provider job id is required to cancel")
 	}
-	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", cfg.TenantID)
-	if cfg.BaseURL != "" {
-		tokenURL = cfg.BaseURL + "/oauth2/v2.0/token"
-	}
-	token, err := azureAccessToken(tokenURL, cfg.ClientID, cfg.ClientSecret)
+	token, err := azureAccessToken(azureTokenURL(cfg), cfg.ClientID, cfg.ClientSecret)
 	if err != nil {
 		return fmt.Errorf("azure: auth: %w", err)
 	}
-	reqURL := fmt.Sprintf("%s/jobs/%s?api-version=2022-09-12-preview", azureWorkspaceBase(cfg), providerJobID)
-	resp, err := azureDo("DELETE", reqURL, token, nil)
+	resp, err := azureDo("DELETE", azureJobURL(cfg, providerJobID), token, nil)
 	if err != nil {
 		return fmt.Errorf("azure: cancel: %w", err)
 	}

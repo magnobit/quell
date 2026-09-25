@@ -8,54 +8,107 @@
 package backends
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/magnobit/quell/internal/config"
+	"github.com/magnobit/quell/internal/ibmauth"
 )
 
-const ibmBase = "https://api.quantum.ibm.com"
+// ibmClient talks to the IBM Quantum Platform REST API for one instance:
+// every call carries an IAM bearer token and the instance CRN.
+type ibmClient struct {
+	api    string // host + "/api/v1"
+	crn    string
+	tokens *ibmauth.TokenSource
+}
 
-// RunIBM submits a circuit to IBM Quantum via the Qiskit Runtime REST API
-// (Sampler V2 primitive). token is the IBM Quantum API token; device is the
-// backend name (e.g. "ibm_brisbane"); instance is "hub/group/project".
-func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, error) {
+func newIBMClient(cfg *config.IBMConfig) (*ibmClient, error) {
 	if cfg.Token == "" {
-		return nil, fmt.Errorf("ibm: token is required (set ibm.token in quell.config.yml or IBM_QUANTUM_TOKEN env var)")
+		return nil, fmt.Errorf("ibm: API key is required (set ibm.token in quell.config.yml or IBM_QUANTUM_TOKEN env var)")
 	}
+	if !ibmauth.IsCRN(cfg.Instance) {
+		return nil, fmt.Errorf("ibm: instance must be the instance CRN from quantum.cloud.ibm.com/instances (set ibm.instance or IBM_QUANTUM_INSTANCE)")
+	}
+	host := strings.TrimRight(cfg.BaseURL, "/")
+	iamURL := ""
+	if host != "" {
+		iamURL = host + "/identity/token"
+	} else {
+		h, err := ibmauth.HostForCRN(cfg.Instance)
+		if err != nil {
+			return nil, fmt.Errorf("ibm: %w", err)
+		}
+		host = h
+	}
+	return &ibmClient{
+		api:    host + "/api/v1",
+		crn:    cfg.Instance,
+		tokens: &ibmauth.TokenSource{APIKey: cfg.Token, URL: iamURL, Client: providerHTTPClient},
+	}, nil
+}
+
+func (c *ibmClient) do(method, path string, body []byte) (*http.Response, error) {
+	bearer, err := c.tokens.Token(context.Background())
+	if err != nil {
+		var iamErr *ibmauth.Error
+		if errors.As(err, &iamErr) {
+			return nil, &ProviderError{Provider: "ibm", Class: classifyHTTP(iamErr.Status), Status: iamErr.Status, Message: iamErr.Message}
+		}
+		return nil, &ProviderError{Provider: "ibm", Class: ClassProviderUnavailable, Message: err.Error()}
+	}
+	h := http.Header{}
+	h.Set("Service-CRN", c.crn)
+	h.Set("IBM-API-Version", ibmauth.APIVersion)
+	return doJSON("ibm", method, c.api+path, "Bearer "+bearer, h, body)
+}
+
+// RunIBM submits a circuit to IBM Quantum Platform (Sampler V2 primitive).
+// cfg.Token is the API key from the dashboard, cfg.Instance the instance
+// CRN, and cfg.Device a backend that instance can use (e.g. "ibm_fez").
+func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, error) {
 	if cfg.Device == "" {
-		return nil, fmt.Errorf("ibm: device is required (e.g. ibm_brisbane)")
+		return nil, fmt.Errorf("ibm: device is required (e.g. ibm_fez)")
 	}
-	if cfg.Instance == "" {
-		cfg.Instance = "ibm-q/open/main"
+	client, err := newIBMClient(cfg)
+	if err != nil {
+		return nil, err
 	}
 	shots := cfg.Shots
 	if shots == 0 {
 		shots = 1024
 	}
-	base := ibmBase
-	if cfg.BaseURL != "" {
-		base = cfg.BaseURL
+
+	target, err := client.target(cfg.Device)
+	if err != nil {
+		return nil, fmt.Errorf("ibm: backend configuration: %w", err)
+	}
+	isa, err := toIBMISA(qasm3, target)
+	if err != nil {
+		return nil, &ProviderError{Provider: "ibm", Class: ClassInvalidRequest, Message: "circuit cannot run on " + cfg.Device + ": " + err.Error()}
 	}
 
-	jobID, err := ibmSubmit(base, cfg.Token, cfg.Device, cfg.Instance, qasm3, shots, cfg.Extra)
+	jobID, err := client.submit(cfg.Device, isa, shots, cfg.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("ibm: submit: %w", err)
 	}
 	notifySubmitted(cfg.OnSubmitted, jobID)
 	fmt.Printf("  IBM job submitted: %s\n", jobID)
 
-	if err := ibmPoll(base, cfg.Token, jobID); err != nil {
+	if err := client.poll(jobID); err != nil {
 		return nil, fmt.Errorf("ibm: %w", err)
 	}
 
-	counts, err := ibmResults(base, cfg.Token, jobID, shots, numQubits)
+	counts, err := client.results(jobID, numQubits)
 	if err != nil {
 		return nil, fmt.Errorf("ibm: results: %w", err)
 	}
@@ -68,7 +121,39 @@ func RunIBM(cfg *config.IBMConfig, qasm3 string, numQubits int) (*RunResult, err
 	}, nil
 }
 
-func ibmSubmit(base, token, backend, instance, qasm3 string, shots int, extra map[string]string) (string, error) {
+// target reads the backend's basis gates and coupling map. A backend that
+// publishes no configuration gets the Heron default with coupling unchecked.
+func (c *ibmClient) target(backend string) (ibmTarget, error) {
+	resp, err := c.do("GET", "/backends/"+url.PathEscape(backend)+"/configuration", nil)
+	if err != nil {
+		var pe *ProviderError
+		if errors.As(err, &pe) && pe.Status == http.StatusNotFound {
+			return defaultIBMTarget, nil
+		}
+		return ibmTarget{}, err
+	}
+	defer resp.Body.Close()
+	var conf struct {
+		NQubits     int      `json:"n_qubits"`
+		BasisGates  []string `json:"basis_gates"`
+		CouplingMap [][]int  `json:"coupling_map"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&conf); err != nil || len(conf.BasisGates) == 0 {
+		return defaultIBMTarget, nil
+	}
+	t := ibmTarget{NumQubits: conf.NQubits, Basis: map[string]bool{}, Coupling: map[[2]int]bool{}}
+	for _, g := range conf.BasisGates {
+		t.Basis[g] = true
+	}
+	for _, e := range conf.CouplingMap {
+		if len(e) == 2 {
+			t.Coupling[[2]int{e[0], e[1]}] = true
+		}
+	}
+	return t, nil
+}
+
+func (c *ibmClient) submit(backend, qasm3 string, shots int, extra map[string]string) (string, error) {
 	params := map[string]any{
 		"pubs":    []any{[]any{qasm3, nil, shots}},
 		"version": 2,
@@ -78,25 +163,20 @@ func ibmSubmit(base, token, backend, instance, qasm3 string, shots int, extra ma
 	body, _ := json.Marshal(map[string]any{
 		"program_id": "sampler",
 		"backend":    backend,
-		"instance":   instance,
 		"params":     params,
 	})
 
-	resp, err := ibmDo("POST", base+"/runtime/jobs", token, body)
+	resp, err := c.do("POST", "/jobs", body)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	var r struct {
-		ID    string `json:"id"`
-		Error string `json:"error"`
+		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
-	}
-	if r.Error != "" {
-		return "", fmt.Errorf("%s", r.Error)
 	}
 	if r.ID == "" {
 		return "", fmt.Errorf("no job id returned")
@@ -104,43 +184,51 @@ func ibmSubmit(base, token, backend, instance, qasm3 string, shots int, extra ma
 	return r.ID, nil
 }
 
-func ibmPoll(base, token, jobID string) error {
-	url := fmt.Sprintf("%s/runtime/jobs/%s", base, jobID)
+func (c *ibmClient) poll(jobID string) error {
+	path := "/jobs/" + url.PathEscape(jobID)
 	return pollUntil("ibm", jobID, func() (pollTick, error) {
-		resp, err := ibmDo("GET", url, token, nil)
+		resp, err := c.do("GET", path, nil)
 		if err != nil {
 			return pollTick{}, err
 		}
 		var r struct {
 			Status string `json:"status"`
-			Error  struct {
-				Message string `json:"message"`
-			} `json:"error"`
+			State  struct {
+				Status string `json:"status"`
+				Reason string `json:"reason"`
+			} `json:"state"`
 		}
 		decErr := json.NewDecoder(resp.Body).Decode(&r)
 		resp.Body.Close()
 		if decErr != nil {
 			return pollTick{}, &ProviderError{Provider: "ibm", Class: ClassInvalidRequest, Message: "malformed job status"}
 		}
-		switch r.Status {
-		case "Completed":
-			return pollTick{Done: true, Status: r.Status}, nil
-		case "Failed", "Cancelled":
-			return pollTick{Failed: true, Status: r.Status, Message: r.Error.Message}, nil
+		status := r.Status
+		if status == "" {
+			status = r.State.Status
+		}
+		switch {
+		case status == "Completed":
+			return pollTick{Done: true, Status: status}, nil
+		case status == "Failed" || strings.HasPrefix(status, "Cancelled"):
+			return pollTick{Failed: true, Status: status, Message: r.State.Reason}, nil
 		default:
-			return pollTick{Status: r.Status}, nil
+			return pollTick{Status: status}, nil
 		}
 	})
 }
 
-func ibmResults(base, token, jobID string, shots, numQubits int) (map[string]int, error) {
-	url := fmt.Sprintf("%s/runtime/jobs/%s/results", base, jobID)
-	resp, err := ibmDo("GET", url, token, nil)
+func (c *ibmClient) results(jobID string, numQubits int) (map[string]int, error) {
+	resp, err := c.do("GET", "/jobs/"+url.PathEscape(jobID)+"/results", nil)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+
+	if counts, ok, err := parseSamplerV2Result(raw); ok {
+		return counts, err
+	}
 
 	// Format 1: circuit-runner — {"results": [{"data": {"counts": {"0x0": 512}}}]}
 	var crFmt struct {
@@ -282,25 +370,19 @@ func hexCountsToStr(hexCounts map[string]int, numQubits int) map[string]int {
 	return counts
 }
 
-func ibmDo(method, url, token string, body []byte) (*http.Response, error) {
-	extra := http.Header{}
-	extra.Set("IBM-API-Version", "2024-06-14")
-	return doJSON("ibm", method, url, "Bearer "+token, extra, body)
-}
-
-// CancelIBM asks IBM Quantum Runtime to cancel an in-flight job.
+// CancelIBM asks IBM Quantum Platform to cancel an in-flight job.
 func CancelIBM(cfg *config.IBMConfig, providerJobID string) error {
 	if cfg == nil || cfg.Token == "" {
-		return fmt.Errorf("ibm: token is required to cancel")
+		return fmt.Errorf("ibm: API key is required to cancel")
 	}
 	if providerJobID == "" {
 		return fmt.Errorf("ibm: provider job id is required to cancel")
 	}
-	base := ibmBase
-	if cfg.BaseURL != "" {
-		base = cfg.BaseURL
+	client, err := newIBMClient(cfg)
+	if err != nil {
+		return err
 	}
-	resp, err := ibmDo("POST", base+"/runtime/jobs/"+providerJobID+"/cancel", cfg.Token, nil)
+	resp, err := client.do("POST", "/jobs/"+url.PathEscape(providerJobID)+"/cancel", nil)
 	if err != nil {
 		return fmt.Errorf("ibm: cancel: %w", err)
 	}
