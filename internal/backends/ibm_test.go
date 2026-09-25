@@ -239,6 +239,33 @@ func TestRunIBM_KnownGoodFixture_SamplerV2Format(t *testing.T) {
 	}
 }
 
+func TestRunIBM_DecodesHexSamples(t *testing.T) {
+	const body = `{"results": [{"data": {"c": {"samples": ["0x0", "0x2", "0x0", "0x0", "0x0", "0x0", "0x3", "0x3"], "num_bits": 2}}, "metadata": {"circuit_metadata": {}}}], "metadata": {"version": 2}}`
+	srv := newIBMServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v1/jobs":
+			w.Write([]byte(`{"id": "job-samples"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/v1/jobs/job-samples":
+			w.Write([]byte(`{"status": "Completed"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/v1/jobs/job-samples/results":
+			w.Write([]byte(body))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.IBMConfig{Token: "tok", Device: "ibm_test", Instance: testIBMCRN, Shots: 8, BaseURL: srv.URL}
+	got, err := RunIBM(cfg, "OPENQASM 3;\nqubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n", 2)
+	if err != nil {
+		t.Fatalf("RunIBM: %v", err)
+	}
+	// 0x0 → 00 (5), 0x2 → 10 (1), 0x3 → 11 (2). Same hex mapping as circuit-runner counts.
+	if got.Counts["00"] != 5 || got.Counts["10"] != 1 || got.Counts["11"] != 2 || len(got.Counts) != 3 {
+		t.Fatalf("Counts = %v, want 00:5 10:1 11:2", got.Counts)
+	}
+}
+
 func TestRunIBM_JobFailedSurfacesError(t *testing.T) {
 	srv := newIBMServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

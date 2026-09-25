@@ -257,6 +257,23 @@ func (c *ibmClient) results(jobID string, numQubits int) (map[string]int, error)
 			nq = samplerFmt.Results[0].Metadata.NumQubits
 		}
 		for _, regRaw := range samplerFmt.Results[0].Data {
+			// Sampler pubs on the current platform return one hex sample per shot:
+			// {"samples": ["0x0", "0x3"], "num_bits": 2}.
+			var samples struct {
+				Samples []string `json:"samples"`
+				NumBits int      `json:"num_bits"`
+			}
+			if json.Unmarshal(regRaw, &samples) == nil && len(samples.Samples) > 0 {
+				width := samples.NumBits
+				if width <= 0 {
+					width = nq
+				}
+				hexCounts := make(map[string]int, len(samples.Samples))
+				for _, s := range samples.Samples {
+					hexCounts[s]++
+				}
+				return hexCountsToStr(hexCounts, width), nil
+			}
 			// Try BitArray with "array" field
 			var ba struct {
 				Array string `json:"array"`
