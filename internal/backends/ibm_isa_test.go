@@ -209,18 +209,18 @@ func TestToIBMISA_TranslatesCompilerOutput(t *testing.T) {
 		t.Fatalf("toIBMISA: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(got), "\n")
-	if lines[0] != "OPENQASM 3;" || lines[1] != `include "stdgates.inc";` {
+	if lines[0] != "OPENQASM 2.0;" || lines[1] != `include "qelib1.inc";` {
 		t.Errorf("header = %q", lines[:2])
 	}
 	for _, l := range lines[2:] {
 		name := strings.FieldsFunc(l, func(r rune) bool { return r == ' ' || r == '(' || r == '[' })[0]
 		switch name {
-		case "rz", "sx", "x", "cz", "qubit", "bit", "c":
+		case "rz", "sx", "x", "cz", "qreg", "creg", "measure":
 		default:
 			t.Errorf("non-ISA line %q", l)
 		}
 	}
-	if !strings.Contains(got, "cz q[0], q[1];") || !strings.HasSuffix(got, "c = measure q;\n") {
+	if strings.Contains(got, "OPENQASM 3") || !strings.Contains(got, "cz q[0], q[1];") || !strings.HasSuffix(got, "measure q -> c;\n") {
 		t.Errorf("translation:\n%s", got)
 	}
 
@@ -229,7 +229,7 @@ func TestToIBMISA_TranslatesCompilerOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("live validation circuit: %v", err)
 	}
-	if strings.Count(got, "stdgates.inc") != 1 || strings.Contains(got, "h q[0]") || !strings.Contains(got, "c[0] = measure q[0];") {
+	if strings.Count(got, "qelib1.inc") != 1 || strings.Contains(got, "stdgates.inc") || strings.Contains(got, "OPENQASM 3") || strings.Contains(got, "h q[0]") || !strings.Contains(got, "measure q[0] -> c[0];") {
 		t.Errorf("live validation circuit translation:\n%s", got)
 	}
 }

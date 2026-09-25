@@ -25,17 +25,20 @@ func (t ibmTarget) coupled(a, b int) bool {
 var defaultIBMTarget = ibmTarget{Basis: map[string]bool{"cz": true, "rz": true, "sx": true, "x": true, "id": true, "measure": true, "reset": true, "delay": true}}
 
 var (
-	qasmDeclRe = regexp.MustCompile(`^(qubit|bit)\s*(\[\s*(\d+)\s*\])?\s+([A-Za-z_]\w*)\s*;$`)
-	qasmRegRe  = regexp.MustCompile(`^(qreg|creg)\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;$`)
-	qasmOpRe   = regexp.MustCompile(`^([A-Za-z_]\w*)\s*(\((.*)\))?\s+(.+);$`)
-	qasmArgRe  = regexp.MustCompile(`^([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]$`)
+	qasmDeclRe       = regexp.MustCompile(`^(qubit|bit)\s*(\[\s*(\d+)\s*\])?\s+([A-Za-z_]\w*)\s*;$`)
+	qasmRegRe        = regexp.MustCompile(`^(qreg|creg)\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;$`)
+	qasmOpRe         = regexp.MustCompile(`^([A-Za-z_]\w*)\s*(\((.*)\))?\s+(.+);$`)
+	qasmArgRe        = regexp.MustCompile(`^([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]$`)
+	qasmMeasureAllRe = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=\s*measure\s+([A-Za-z_]\w*)\s*;$`)
+	qasmMeasureBitRe = regexp.MustCompile(`^([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*=\s*measure\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;$`)
 )
 
 // toIBMISA rewrites an OpenQASM 3 circuit into the rz/sx/x/cz instruction set
-// IBM primitives require, with qubits mapped trivially to physical qubits.
-// It rejects what it cannot translate faithfully (control flow, custom gates,
-// two-qubit gates on uncoupled qubits) instead of letting the job fail on
-// the QPU.
+// IBM primitives require, emitted as OpenQASM 2.0. The Runtime sampler loads
+// the circuit with Qiskit's standard QASM 2 parser, which rejects OpenQASM 3.
+// Qubits stay mapped trivially to physical qubits. It rejects what it cannot
+// translate faithfully (control flow, custom gates, two-qubit gates on
+// uncoupled qubits) instead of letting the job fail on the QPU.
 func toIBMISA(src string, t ibmTarget) (string, error) {
 	if !t.Basis["cz"] || !t.Basis["rz"] || !t.Basis["sx"] {
 		return "", fmt.Errorf("backend basis %v is not rz/sx/cz; native translation for it is not supported", sortedBasis(t.Basis))
@@ -56,23 +59,26 @@ func toIBMISA(src string, t ibmTarget) (string, error) {
 		case line == "":
 			continue
 		case strings.HasPrefix(line, "OPENQASM"):
-			out = append(out, line)
+			out = append(out, "OPENQASM 2.0;")
 			continue
 		case strings.HasPrefix(line, "include"):
-			hasInclude = hasInclude || strings.Contains(line, "stdgates.inc")
-			out = append(out, line)
+			hasInclude = true
+			out = append(out, `include "qelib1.inc";`)
 			continue
 		}
 		if m := qasmDeclRe.FindStringSubmatch(line); m != nil {
-			if m[1] == "qubit" {
-				size := 1
-				if m[3] != "" {
-					size, _ = strconv.Atoi(m[3])
-				}
-				qubitBase[m[4]], qubitSize[m[4]] = total, size
-				total += size
+			size := m[3]
+			if size == "" {
+				size = "1"
 			}
-			out = append(out, line)
+			nSize, _ := strconv.Atoi(size)
+			if m[1] == "qubit" {
+				qubitBase[m[4]], qubitSize[m[4]] = total, nSize
+				total += nSize
+				out = append(out, fmt.Sprintf("qreg %s[%s];", m[4], size))
+			} else {
+				out = append(out, fmt.Sprintf("creg %s[%s];", m[4], size))
+			}
 			continue
 		}
 		if m := qasmRegRe.FindStringSubmatch(line); m != nil {
@@ -84,7 +90,15 @@ func toIBMISA(src string, t ibmTarget) (string, error) {
 			out = append(out, line)
 			continue
 		}
-		if strings.Contains(line, "measure") || strings.HasPrefix(line, "barrier") || strings.HasPrefix(line, "reset") {
+		if strings.Contains(line, "measure") {
+			converted, ok := qasm2Measure(line)
+			if !ok {
+				return "", fmt.Errorf("line %d: %q cannot be written as an OpenQASM 2.0 measure", n+1, line)
+			}
+			out = append(out, converted)
+			continue
+		}
+		if strings.HasPrefix(line, "barrier") || strings.HasPrefix(line, "reset") {
 			out = append(out, line)
 			continue
 		}
@@ -144,9 +158,24 @@ func toIBMISA(src string, t ibmTarget) (string, error) {
 		if len(out) > 0 && strings.HasPrefix(out[0], "OPENQASM") {
 			at = 1
 		}
-		out = append(out[:at], append([]string{`include "stdgates.inc";`}, out[at:]...)...)
+		out = append(out[:at], append([]string{`include "qelib1.inc";`}, out[at:]...)...)
 	}
 	return strings.Join(out, "\n") + "\n", nil
+}
+
+// qasm2Measure rewrites an OpenQASM 3 measure into the form Qiskit's
+// OpenQASM 2 loader accepts. Lines that are already QASM 2 pass through.
+func qasm2Measure(line string) (string, bool) {
+	if strings.HasPrefix(line, "measure ") && strings.Contains(line, "->") {
+		return line, true
+	}
+	if m := qasmMeasureBitRe.FindStringSubmatch(line); m != nil {
+		return fmt.Sprintf("measure %s[%s] -> %s[%s];", m[3], m[4], m[1], m[2]), true
+	}
+	if m := qasmMeasureAllRe.FindStringSubmatch(line); m != nil {
+		return fmt.Sprintf("measure %s -> %s;", m[2], m[1]), true
+	}
+	return "", false
 }
 
 type isaOp struct {

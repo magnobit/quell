@@ -389,8 +389,8 @@ func TestRunIBM_SubmitsISACircuitAndDecodesSamplerV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunIBM: %v", err)
 	}
-	if strings.Contains(submitted, "h q[0]") || !strings.Contains(submitted, "sx q[0];") || !strings.Contains(submitted, `include "stdgates.inc";`) {
-		t.Errorf("submitted circuit is not ISA:\n%s", submitted)
+	if strings.Contains(submitted, "h q[0]") || strings.Contains(submitted, "OPENQASM 3") || !strings.Contains(submitted, "sx q[0];") || !strings.HasPrefix(submitted, "OPENQASM 2.0;\n") || !strings.Contains(submitted, `include "qelib1.inc";`) || !strings.Contains(submitted, "measure q -> c;") {
+		t.Errorf("submitted circuit is not OpenQASM 2 ISA:\n%s", submitted)
 	}
 	if got.Counts["0"] != 1 || got.Counts["1"] != 3 {
 		t.Errorf("Counts = %v", got.Counts)
