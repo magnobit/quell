@@ -131,13 +131,13 @@ Quell never stores credentials. Credentials live in environment variables, expan
 # quell.config.yml
 backend: ibm
 ibm:
-  token: ${IBM_QUANTUM_TOKEN}
-  instance: ibm-q/open/main
-  device: ibm_brisbane
+  token: ${IBM_QUANTUM_TOKEN}        # API key from quantum.cloud.ibm.com
+  instance: ${IBM_QUANTUM_INSTANCE}  # instance CRN: crn:v1:bluemix:public:quantum-computing:<region>:a/<account>:<id>::
+  device: ibm_fez
   shots: 1024
 ```
 
-Quell submits the circuit as OpenQASM 3 to the IBM Quantum Runtime (Sampler V2) and polls until complete. Results printed as a measurement histogram.
+Quell exchanges the API key for an IAM token, reads the backend's basis gates and coupling map, rewrites the circuit into its native `rz`/`sx`/`x`/`cz` gates (trivial layout, no routing: two-qubit gates must act on coupled qubits), submits it as OpenQASM 3 to IBM Quantum Platform (Sampler V2), and polls until complete. Results are printed as a measurement histogram.
 
 ### AWS Braket
 
@@ -164,7 +164,7 @@ google:
   key_file: /path/to/service-account.json
 ```
 
-`key_file` is the path to a Google Cloud service account JSON key file with Quantum Engine access. Quell handles JWT creation and OAuth2 token exchange internally.
+`key_file` is the path to a Google Cloud service account JSON key file with Quantum Engine access. Quell handles JWT creation and OAuth2 token exchange internally. Quantum Engine is access-restricted and expects Cirq-serialized programs; the OpenQASM upload path is not yet validated against it.
 
 ### IonQ Cloud
 
@@ -201,11 +201,12 @@ azure:
   subscription_id: ${AZURE_SUBSCRIPTION_ID}
   resource_group: my-resource-group
   workspace: my-quantum-workspace
-  target: ionq.simulator
+  location: eastus                 # workspace region
+  target: quantinuum.sim.h2-1e
   shots: 500
 ```
 
-Auth uses the Azure AD OAuth2 client-credentials flow (service principal). Quell exchanges your credentials for a bearer token, then submits, polls, and fetches results from the configured workspace/target.
+Auth uses the Azure AD OAuth2 client-credentials flow (service principal). Quell exchanges your credentials for a bearer token, uploads the circuit to the workspace's linked storage through a SAS link, creates the job on the regional data plane (`https://<location>.quantum.azure.com`), polls, and reads the output blob. OpenQASM input is accepted by Quantinuum targets; other providers need their own `inputDataFormat` (set via `extra`) and a matching payload.
 
 ### D-Wave — QUBO / annealer (not gate Quell)
 

@@ -4,18 +4,49 @@ package telemetry
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
+const testIBMCRN = "crn:v1:bluemix:public:quantum-computing:us-east:a/acct:inst::"
+
+// newIBMTestServer answers IAM token requests itself and hands every other
+// request to h, so each test only describes the backend endpoints.
+func newIBMTestServer(h http.Handler) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			io.WriteString(w, `{"access_token":"iam-bearer","expires_in":3600}`)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}))
+}
+
+func TestIBMTelemetryClient_SendsBearerAndServiceCRN(t *testing.T) {
+	var gotAuth, gotCRN string
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotCRN = r.Header.Get("Authorization"), r.Header.Get("Service-CRN")
+		io.WriteString(w, `{"n_qubits": 5}`)
+	}))
+	defer srv.Close()
+	c := &IBMTelemetryClient{Token: "api-key", Instance: testIBMCRN, Device: "ibm_test", BaseURL: srv.URL}
+	if _, err := c.FetchTelemetry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer iam-bearer" || gotCRN != testIBMCRN {
+		t.Fatalf("Authorization=%q Service-CRN=%q", gotAuth, gotCRN)
+	}
+}
+
 func TestIBMTelemetryClient_ParsesKnownGoodResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/runtime/backends/ibm_test/configuration":
+		case r.URL.Path == "/api/v1/backends/ibm_test/configuration":
 			w.Write([]byte(`{"n_qubits": 27, "basis_gates": ["cx", "id", "rz", "sx", "x"], "coupling_map": [[0,1],[1,0],[1,2],[2,1]]}`))
-		case r.URL.Path == "/runtime/backends/ibm_test/properties":
+		case r.URL.Path == "/api/v1/backends/ibm_test/properties":
 			w.Write([]byte(`{
 				"last_update_date": "2026-08-20T12:00:00Z",
 				"qubits": [
@@ -99,7 +130,7 @@ func TestIBMTelemetryClient_ParsesKnownGoodResponse(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_MissingFieldsStayNilNotFabricated(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Both endpoints return valid-but-empty JSON — simulates a real
 		// response that just doesn't carry the fields we look for.
 		w.Write([]byte(`{}`))
@@ -123,7 +154,7 @@ func TestIBMTelemetryClient_MissingFieldsStayNilNotFabricated(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_BothEndpointsFailingIsAnError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -136,8 +167,8 @@ func TestIBMTelemetryClient_BothEndpointsFailingIsAnError(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_PartialFailureIsNotAnError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/runtime/backends/ibm_test/configuration" {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/backends/ibm_test/configuration" {
 			w.Write([]byte(`{"n_qubits": 5, "basis_gates": ["cx", "x"]}`))
 			return
 		}
@@ -164,8 +195,8 @@ func TestIBMTelemetryClient_PartialFailureIsNotAnError(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_ScalarReadoutIsNotAMatrix(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/runtime/backends/ibm_test/configuration" {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/backends/ibm_test/configuration" {
 			w.Write([]byte(`{"n_qubits": 2}`))
 			return
 		}
@@ -198,8 +229,8 @@ func TestIBMTelemetryClient_ScalarReadoutIsNotAMatrix(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_RejectsInvalidNumericValues(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/runtime/backends/ibm_test/configuration" {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/backends/ibm_test/configuration" {
 			w.Write([]byte(`{"n_qubits": 1, "coupling_map": [[0,-1]]}`))
 			return
 		}
@@ -231,7 +262,7 @@ func TestIBMTelemetryClient_RejectsInvalidNumericValues(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_OneSidedAssignmentIsNotAMatrix(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "configuration") {
 			w.Write([]byte(`{"n_qubits": 1}`))
 			return
@@ -250,7 +281,7 @@ func TestIBMTelemetryClient_OneSidedAssignmentIsNotAMatrix(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_SingularAssignmentRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "configuration") {
 			w.Write([]byte(`{"n_qubits": 1}`))
 			return
@@ -269,7 +300,7 @@ func TestIBMTelemetryClient_SingularAssignmentRejected(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_PartialPropertiesKeepValidFields(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "configuration") {
 			w.Write([]byte(`{"n_qubits": 2, "coupling_map": [[0,1],[1,0]]}`))
 			return
@@ -294,7 +325,7 @@ func TestIBMTelemetryClient_PartialPropertiesKeepValidFields(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_AuthFailureKind(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -310,7 +341,7 @@ func TestIBMTelemetryClient_AuthFailureKind(t *testing.T) {
 }
 
 func TestIBMTelemetryClient_PermissionFailureKind(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIBMTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer srv.Close()

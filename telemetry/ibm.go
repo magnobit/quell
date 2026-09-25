@@ -7,6 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+
+	"github.com/magnobit/quell/internal/ibmauth"
 )
 
 // errAllTelemetryRequestsFailed is returned only when every telemetry
@@ -14,12 +19,6 @@ import (
 // a partial result (one endpoint succeeded, the other didn't) is not an
 // error, it's just a BackendTelemetry with fewer fields populated.
 var errAllTelemetryRequestsFailed = errors.New("telemetry: no telemetry endpoint returned data")
-
-// ibmTelemetryBase is deliberately its own constant rather than importing
-// quell/internal/backends' ibmBase: this package needs to be importable
-// from outside the quell module (qubitlabs-platform's scheduler consumes
-// it), and internal/ packages can't be — see this package's doc comment.
-const ibmTelemetryBase = "https://api.quantum.ibm.com"
 
 // IBMTelemetryClient fetches live backend characteristics from IBM Quantum's
 // configuration + properties endpoints — entirely separate from
@@ -29,20 +28,23 @@ const ibmTelemetryBase = "https://api.quantum.ibm.com"
 // fail a job submission if the provider's calibration data is temporarily
 // unavailable.
 //
-// Endpoint shapes: IBM's Qiskit Runtime REST API exposes
-// GET /runtime/backends/{name}/configuration (n_qubits, basis_gates) and
-// GET /runtime/backends/{name}/properties (per-qubit/per-gate calibration,
+// Endpoint shapes: IBM Quantum Platform exposes
+// GET /api/v1/backends/{name}/configuration (n_qubits, basis_gates) and
+// GET /api/v1/backends/{name}/properties (per-qubit/per-gate calibration,
 // classic Qiskit BackendProperties JSON shape: qubits[][{name,value}],
 // gates[]{gate,qubits,parameters[]{name,value}}, last_update_date). Both are
 // parsed defensively below — an unrecognized shape or a failed request
 // leaves the corresponding fields nil rather than erroring the whole fetch.
-// Verify these paths against current IBM docs against a real account before
-// relying on this in production; the parsing logic itself is covered by
-// fixture-based tests independent of that.
+// Calls authenticate with an IAM bearer token traded for Token and send
+// Instance (the instance CRN) as Service-CRN.
 type IBMTelemetryClient struct {
-	Token   string
-	Device  string
-	BaseURL string // defaults to ibmTelemetryBase when empty; overridable for tests
+	Token    string // IBM Quantum Platform API key
+	Instance string // instance CRN; picks the regional host
+	Device   string
+	BaseURL  string // overrides the host and IAM (BaseURL+"/identity/token"); for tests
+
+	once   sync.Once
+	tokens *ibmauth.TokenSource
 }
 
 type qubitParam struct {
@@ -51,11 +53,29 @@ type qubitParam struct {
 	Unit  string  `json:"unit,omitempty"`
 }
 
-func (c *IBMTelemetryClient) baseURL() string {
-	if c.BaseURL != "" {
-		return c.BaseURL
+// backendURL returns the API URL for one backend resource, or "" when the
+// instance CRN does not name a supported region.
+func (c *IBMTelemetryClient) backendURL(resource string) string {
+	host := strings.TrimRight(c.BaseURL, "/")
+	if host == "" {
+		h, err := ibmauth.HostForCRN(c.Instance)
+		if err != nil {
+			return ""
+		}
+		host = h
 	}
-	return ibmTelemetryBase
+	return host + "/api/v1/backends/" + url.PathEscape(c.Device) + "/" + resource
+}
+
+func (c *IBMTelemetryClient) tokenSource() *ibmauth.TokenSource {
+	c.once.Do(func() {
+		iam := ""
+		if c.BaseURL != "" {
+			iam = strings.TrimRight(c.BaseURL, "/") + "/identity/token"
+		}
+		c.tokens = &ibmauth.TokenSource{APIKey: c.Token, URL: iam, Client: telemetryHTTPClient}
+	})
+	return c.tokens
 }
 
 // FetchTelemetry never returns an error for a partial result — a nil field
@@ -86,7 +106,7 @@ func (c *IBMTelemetryClient) fetchConfiguration(ctx context.Context, out *Backen
 		BasisGates  []string `json:"basis_gates"`
 		CouplingMap [][2]int `json:"coupling_map"` // Qiskit BackendConfiguration's real field name/shape: [[control, target], ...], usually listed both directions
 	}
-	ok, kind := c.getJSON(ctx, c.baseURL()+"/runtime/backends/"+c.Device+"/configuration", &cfg)
+	ok, kind := c.getJSON(ctx, c.backendURL("configuration"), &cfg)
 	if !ok {
 		if kind != "" {
 			out.FailKind = kind
@@ -124,7 +144,7 @@ func (c *IBMTelemetryClient) fetchProperties(ctx context.Context, out *BackendTe
 			Parameters []qubitParam `json:"parameters"`
 		} `json:"gates"`
 	}
-	ok, kind := c.getJSON(ctx, c.baseURL()+"/runtime/backends/"+c.Device+"/properties", &props)
+	ok, kind := c.getJSON(ctx, c.backendURL("properties"), &props)
 	if !ok {
 		if kind != "" {
 			out.FailKind = kind
@@ -252,14 +272,24 @@ func average(vals []float64) *float64 {
 
 // getJSON returns (ok, failKind). A failed request is "this endpoint
 // didn't contribute," not a hard failure of the whole fetch.
-func (c *IBMTelemetryClient) getJSON(ctx context.Context, url string, dst any) (bool, string) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (c *IBMTelemetryClient) getJSON(ctx context.Context, rawURL string, dst any) (bool, string) {
+	if rawURL == "" {
+		return false, "invalid_request"
+	}
+	bearer, err := c.tokenSource().Token(ctx)
+	if err != nil {
+		var iamErr *ibmauth.Error
+		if errors.As(err, &iamErr) {
+			return false, classifyHTTPStatus(iamErr.Status)
+		}
+		return false, classifyNetErr(err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return false, classifyNetErr(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	ibmauth.SetHeaders(req.Header, bearer, c.Instance)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("IBM-API-Version", "2024-06-14")
 
 	resp, err := telemetryHTTPClient.Do(req)
 	if err != nil {

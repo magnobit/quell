@@ -38,7 +38,7 @@ Local noise models: --noise depolarizing=0.01 (also NOISE in source).`,
 		Example: `  quell run bell.quell
   quell run param.quell --param theta=1.5708
   quell run bell.quell --noise depolarizing=0.01 --noise amplitude_damping=0.02
-  quell run bell.quell --backend ibm --ibm-token $IBM_TOKEN --ibm-device ibm_brisbane`,
+  quell run bell.quell --backend ibm --ibm-token $IBM_TOKEN --ibm-device ibm_fez`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !strings.HasSuffix(args[0], ".quell") {
@@ -80,9 +80,9 @@ Local noise models: --noise depolarizing=0.01 (also NOISE in source).`,
 	f.StringArrayVar(&noiseFlags, "noise", nil, "local noise: depolarizing=0.01 or amplitude_damping=0.05 (repeatable)")
 	f.Int("shots", 0, "shots for the local backend")
 
-	f.String("ibm-token", "", "IBM Quantum API token (env IBM_QUANTUM_TOKEN)")
-	f.String("ibm-instance", "", "IBM instance, e.g. hub/group/project (default ibm-q/open/main)")
-	f.String("ibm-device", "", "IBM device, e.g. ibm_brisbane")
+	f.String("ibm-token", "", "IBM Quantum Platform API key (env IBM_QUANTUM_TOKEN)")
+	f.String("ibm-instance", "", "IBM Quantum Platform instance CRN, crn:v1:…:quantum-computing:<region>:… (env IBM_QUANTUM_INSTANCE)")
+	f.String("ibm-device", "", "IBM backend, e.g. ibm_fez")
 	f.Int("ibm-shots", 0, "shots for IBM Quantum")
 
 	f.String("aws-access-key-id", "", "AWS access key ID (env AWS_ACCESS_KEY_ID — preferred, matches the AWS CLI convention)")
@@ -113,6 +113,7 @@ Local noise models: --noise depolarizing=0.01 (also NOISE in source).`,
 	f.String("azure-subscription-id", "", "Azure subscription ID (env AZURE_SUBSCRIPTION_ID)")
 	f.String("azure-resource-group", "", "Azure resource group")
 	f.String("azure-workspace", "", "Azure Quantum workspace name")
+	f.String("azure-location", "", "Azure Quantum workspace region, e.g. eastus (env AZURE_QUANTUM_LOCATION)")
 	f.String("azure-target", "", "Azure Quantum target, e.g. ionq.simulator")
 	f.Int("azure-shots", 0, "shots for Azure Quantum")
 
@@ -134,7 +135,7 @@ func applyRunFlags(cmd *cobra.Command, cfg *config.Config, backendOverride strin
 	cfg.Local.Shots = resolveInt(cmd, "shots", cfg.Local.Shots)
 
 	cfg.IBM.Token = resolveStr(cmd, "ibm-token", "IBM_QUANTUM_TOKEN", cfg.IBM.Token)
-	cfg.IBM.Instance = resolveStr(cmd, "ibm-instance", "", cfg.IBM.Instance)
+	cfg.IBM.Instance = resolveStr(cmd, "ibm-instance", "IBM_QUANTUM_INSTANCE", cfg.IBM.Instance)
 	cfg.IBM.Device = resolveStr(cmd, "ibm-device", "", cfg.IBM.Device)
 	cfg.IBM.Shots = resolveInt(cmd, "ibm-shots", cfg.IBM.Shots)
 
@@ -166,6 +167,7 @@ func applyRunFlags(cmd *cobra.Command, cfg *config.Config, backendOverride strin
 	cfg.Azure.SubscriptionID = resolveStr(cmd, "azure-subscription-id", "AZURE_SUBSCRIPTION_ID", cfg.Azure.SubscriptionID)
 	cfg.Azure.ResourceGroup = resolveStr(cmd, "azure-resource-group", "", cfg.Azure.ResourceGroup)
 	cfg.Azure.Workspace = resolveStr(cmd, "azure-workspace", "", cfg.Azure.Workspace)
+	cfg.Azure.Location = resolveStr(cmd, "azure-location", "AZURE_QUANTUM_LOCATION", cfg.Azure.Location)
 	cfg.Azure.Target = resolveStr(cmd, "azure-target", "", cfg.Azure.Target)
 	cfg.Azure.Shots = resolveInt(cmd, "azure-shots", cfg.Azure.Shots)
 

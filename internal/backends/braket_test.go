@@ -3,6 +3,7 @@
 package backends
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -63,9 +64,9 @@ func TestRunBraket_KnownGoodFixture(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/quantum-task":
-			w.Write([]byte(`{"quantumTaskArn": "arn:aws:braket:task-1", "outputS3Bucket": "my-bucket", "outputS3Directory": "results-dir"}`))
+			w.Write([]byte(`{"quantumTaskArn": "arn:aws:braket:task-1"}`))
 		case r.Method == "GET" && r.URL.Path == "/quantum-task/arn:aws:braket:task-1":
-			w.Write([]byte(`{"status": "COMPLETED"}`))
+			w.Write([]byte(`{"status": "COMPLETED", "outputS3Bucket": "my-bucket", "outputS3Directory": "results-dir"}`))
 		case r.Method == "GET" && r.URL.Path == "/my-bucket/results-dir/results.json":
 			w.Write([]byte(`{"measurements": [[0, 1], [1, 0], [0, 1]]}`))
 		default:
@@ -146,6 +147,57 @@ func TestRunBraket_SubmitHTTPErrorSurfaces(t *testing.T) {
 	_, err := RunBraket(cfg, "OPENQASM 3;")
 	if err == nil {
 		t.Fatal("expected an error for a non-2xx submit response")
+	}
+}
+
+func TestRunBraket_SendsClientTokenAndEscapesTaskArn(t *testing.T) {
+	clearAWSEnv(t)
+	const arn = "arn:aws:braket:us-east-1:123456789012:quantum-task/abc-123"
+	var submit map[string]any
+	var rawPollPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/quantum-task":
+			json.NewDecoder(r.Body).Decode(&submit)
+			w.Write([]byte(`{"quantumTaskArn": "` + arn + `"}`))
+		case r.Method == "GET" && r.URL.Path == "/quantum-task/"+arn:
+			rawPollPath = r.URL.EscapedPath()
+			w.Write([]byte(`{"status": "COMPLETED", "outputS3Bucket": "b", "outputS3Directory": "quell-results/abc-123"}`))
+		case r.Method == "GET" && r.URL.Path == "/b/quell-results/abc-123/results.json":
+			w.Write([]byte(`{"measurements": [[1]]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.AWSConfig{AccessKeyID: "AKIA", SecretAccessKey: "secret", S3Bucket: "b", BaseURL: srv.URL}
+	if _, err := RunBraket(cfg, "OPENQASM 3;"); err != nil {
+		t.Fatalf("RunBraket: %v", err)
+	}
+	if tok, _ := submit["clientToken"].(string); len(tok) != 36 {
+		t.Errorf("clientToken = %v, want a UUID", submit["clientToken"])
+	}
+	if submit["outputS3KeyPrefix"] != "quell-results" {
+		t.Errorf("outputS3KeyPrefix = %v", submit["outputS3KeyPrefix"])
+	}
+	if rawPollPath != "/quantum-task/arn%3Aaws%3Abraket%3Aus-east-1%3A123456789012%3Aquantum-task%2Fabc-123" {
+		t.Errorf("poll path sent as %q", rawPollPath)
+	}
+}
+
+func TestAWSCanonicalPath_DoubleEncodesExceptS3(t *testing.T) {
+	sent := "/quantum-task/" + awsEscapeSegment("arn:aws:braket:us-east-1:1:quantum-task/x")
+	got := awsCanonicalPath(sent, "braket")
+	want := "/quantum-task/arn%253Aaws%253Abraket%253Aus-east-1%253A1%253Aquantum-task%252Fx"
+	if got != want {
+		t.Errorf("braket canonical = %s\nwant %s", got, want)
+	}
+	if got := awsCanonicalPath("/bucket/quell-results/x/results.json", "s3"); got != "/bucket/quell-results/x/results.json" {
+		t.Errorf("s3 canonical = %s", got)
+	}
+	if got := awsCanonicalPath("", "braket"); got != "/" {
+		t.Errorf("empty path canonical = %s", got)
 	}
 }
 

@@ -67,27 +67,30 @@ func runIBMLive(t *testing.T, budget Budget, jobsUsed *int, started time.Time) [
 	var out []Evidence
 	token := envOr("IBM_QUANTUM_TOKEN", "IBM_TELEMETRY_TOKEN")
 	device := envOr("QUELL_LIVE_IBM_BACKEND", "IBM_TELEMETRY_DEVICE")
-	if device == "" {
-		device = "ibm_brisbane"
-	}
-	instance := envOr("QUELL_LIVE_IBM_INSTANCE")
-	if instance == "" {
-		instance = "ibm-q/open/main"
-	}
+	instance := envOr("QUELL_LIVE_IBM_INSTANCE", "IBM_QUANTUM_INSTANCE")
 
 	out = append(out, ibmMissingToken())
-	out = append(out, ibmInvalidToken(device))
+	out = append(out, ibmInvalidToken(device, instance))
 
-	if token == "" {
-		out = append(out, Evidence{Provider: "ibm", ValidationKind: "auth", Status: "NOT_RUN", ResultSummary: "credentials unavailable"})
-		out = append(out, Evidence{Provider: "ibm", ValidationKind: "telemetry", Status: "NOT_RUN", ResultSummary: "credentials unavailable"})
-		out = append(out, Evidence{Provider: "ibm", ValidationKind: "submit", Status: "NOT_RUN", ResultSummary: "credentials unavailable"})
+	missing := ""
+	switch {
+	case token == "":
+		missing = "credentials unavailable"
+	case instance == "":
+		missing = "instance CRN unavailable (set QUELL_LIVE_IBM_INSTANCE)"
+	case device == "":
+		missing = "backend unavailable (set QUELL_LIVE_IBM_BACKEND)"
+	}
+	if missing != "" {
+		for _, kind := range []string{"auth", "telemetry", "submit"} {
+			out = append(out, Evidence{Provider: "ibm", ValidationKind: kind, Status: "NOT_RUN", ResultSummary: missing})
+		}
 		return out
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	client := &telemetry.IBMTelemetryClient{Token: token, Device: device}
+	client := &telemetry.IBMTelemetryClient{Token: token, Instance: instance, Device: device}
 	tel, err := client.FetchTelemetry(ctx)
 	ev := Evidence{
 		Provider:         "ibm",
@@ -245,9 +248,13 @@ func ibmMissingToken() Evidence {
 	return Evidence{Provider: "ibm", ValidationKind: "auth_missing", Status: status, ResultSummary: summary}
 }
 
-func ibmInvalidToken(device string) Evidence {
-	_, err := backends.RunIBM(&config.IBMConfig{Token: "p5a-invalid-token", Device: device}, MinimalCircuit, 1)
+func ibmInvalidToken(device, instance string) Evidence {
 	ev := Evidence{Provider: "ibm", Backend: device, ValidationKind: "auth_invalid"}
+	if device == "" || instance == "" {
+		ev.Status, ev.ResultSummary = "NOT_RUN", "needs a backend and instance CRN to reach IAM"
+		return ev
+	}
+	_, err := backends.RunIBM(&config.IBMConfig{Token: "p5a-invalid-token", Device: device, Instance: instance}, MinimalCircuit, 1)
 	if err == nil {
 		ev.Status = "FAIL"
 		ev.ResultSummary = "invalid token was accepted"

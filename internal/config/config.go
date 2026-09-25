@@ -41,8 +41,9 @@ type IBMConfig struct {
 	Device   string            `yaml:"device"`
 	Shots    int               `yaml:"shots"`
 	Extra    map[string]string `yaml:"extra"`
-	// BaseURL overrides the IBM Quantum Runtime API base URL. Empty (the
-	// default for every real caller) uses the public endpoint; used by
+	// BaseURL overrides both the IBM Quantum Platform host (normally chosen
+	// from the CRN region) and IAM (BaseURL+"/identity/token"). Empty (the
+	// default for every real caller) uses the public endpoints; used by
 	// contract tests to point RunIBM at an httptest server.
 	BaseURL string `yaml:"base_url"`
 	// OnSubmitted is invoked with the provider job id immediately after
@@ -122,14 +123,14 @@ type AzureConfig struct {
 	SubscriptionID string            `yaml:"subscription_id"`
 	ResourceGroup  string            `yaml:"resource_group"`
 	Workspace      string            `yaml:"workspace"`
+	Location       string            `yaml:"location"` // workspace region, e.g. eastus
 	Target         string            `yaml:"target"`
 	Shots          int               `yaml:"shots"`
 	Extra          map[string]string `yaml:"extra"`
 	// BaseURL overrides both the AAD token endpoint (BaseURL+"/oauth2/v2.0/token")
-	// and the workspace management API base (normally built from
-	// SubscriptionID/ResourceGroup/Workspace). Empty (the default for
-	// every real caller) uses the real AAD/ARM hosts; used by contract
-	// tests to point RunAzure at a single httptest server.
+	// and the regional data-plane host (normally https://{Location}.quantum.azure.com).
+	// Empty (the default for every real caller) uses the real hosts; used
+	// by contract tests to point RunAzure at a single httptest server.
 	BaseURL string `yaml:"base_url"`
 	OnSubmitted func(jobID string) `yaml:"-"`
 }

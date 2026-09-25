@@ -528,8 +528,8 @@ local:
 
 ibm:
   token: ${IBM_QUANTUM_TOKEN}
-  instance: ibm-q/open/main
-  device: ibm_brisbane
+  instance: ${IBM_QUANTUM_INSTANCE}  # instance CRN
+  device: ibm_fez
   shots: 4096
 
 aws:
@@ -561,7 +561,8 @@ azure:
   subscription_id: ${AZURE_SUBSCRIPTION_ID}
   resource_group: my-resource-group
   workspace: my-quantum-workspace
-  target: ionq.simulator
+  location: eastus
+  target: quantinuum.sim.h2-1e
   shots: 500
 
 dwave:

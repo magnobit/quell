@@ -3,6 +3,8 @@
 package backends
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/magnobit/quell/internal/config"
 )
+
+const azureWS = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Quantum/workspaces/ws"
 
 func validAzureCfg(baseURL string) *config.AzureConfig {
 	return &config.AzureConfig{
@@ -19,7 +23,8 @@ func validAzureCfg(baseURL string) *config.AzureConfig {
 		SubscriptionID: "sub",
 		ResourceGroup:  "rg",
 		Workspace:      "ws",
-		Target:         "ionq.simulator",
+		Location:       "eastus",
+		Target:         "quantinuum.sim.h2-1e",
 		BaseURL:        baseURL,
 	}
 }
@@ -44,184 +49,175 @@ func TestRunAzure_MissingAADCredentialsRejectedBeforeHTTP(t *testing.T) {
 }
 
 func TestRunAzure_MissingWorkspaceFieldsRejectedBeforeHTTP(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cfg := validAzureCfg(srv.URL)
+	cfg := validAzureCfg("")
 	cfg.Workspace = ""
-	_, err := RunAzure(cfg, "OPENQASM 3;")
-	if err == nil {
+	if _, err := RunAzure(cfg, "OPENQASM 3;"); err == nil {
 		t.Fatal("expected an error for missing subscription_id/resource_group/workspace")
 	}
-	if called {
-		t.Error("no HTTP call should have been made before validating workspace fields")
+}
+
+func TestRunAzure_MissingLocationRejectedBeforeHTTP(t *testing.T) {
+	cfg := validAzureCfg("")
+	cfg.Location = ""
+	_, err := RunAzure(cfg, "OPENQASM 3;")
+	if err == nil || !strings.Contains(err.Error(), "location") {
+		t.Fatalf("got %v, want location error", err)
 	}
 }
 
 func TestRunAzure_MissingTargetRejectedBeforeHTTP(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cfg := validAzureCfg(srv.URL)
+	cfg := validAzureCfg("")
 	cfg.Target = ""
-	_, err := RunAzure(cfg, "OPENQASM 3;")
-	if err == nil {
+	if _, err := RunAzure(cfg, "OPENQASM 3;"); err == nil {
 		t.Fatal("expected an error for missing target")
-	}
-	if called {
-		t.Error("no HTTP call should have been made before validating target")
 	}
 }
 
-// newAzureMux builds a mux with the AAD token endpoint pre-wired, plus a
-// /jobs/ handler whose PUT and GET behavior the caller supplies. Azure's job
-// ID is generated client-side (time-based) so tests can't know the exact
-// path in advance — matching on the "/jobs/" prefix handles any ID.
-func newAzureMux(t *testing.T, put, get func(w http.ResponseWriter, r *http.Request, jobID string)) (*httptest.Server, *string) {
+func TestRunAzure_ProviderWithoutQASMFormatRejected(t *testing.T) {
+	cfg := validAzureCfg("")
+	cfg.Target = "ionq.simulator"
+	_, err := RunAzure(cfg, "OPENQASM 3;")
+	if err == nil || !strings.Contains(err.Error(), "inputDataFormat") {
+		t.Fatalf("got %v, want inputDataFormat hint", err)
+	}
+}
+
+// azureFake is an in-memory Azure Quantum workspace: AAD, storage SAS, blob
+// upload, job create/get, and result blob.
+type azureFake struct {
+	srv        *httptest.Server
+	uploaded   string
+	job        map[string]any
+	jobID      string
+	status     string
+	errMsg     string
+	resultBody string
+	putStatus  int
+}
+
+func newAzureFake(t *testing.T) *azureFake {
 	t.Helper()
+	f := &azureFake{status: "Succeeded", resultBody: `{"c": ["00", "11", "11"]}`}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth2/v2.0/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"access_token": "aad-token-1"}`))
 	})
-	var lastJobID string
-	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
-		jobID := strings.TrimPrefix(r.URL.Path, "/jobs/")
-		lastJobID = jobID
-		switch r.Method {
-		case "PUT":
-			put(w, r, jobID)
-		case "GET":
-			get(w, r, jobID)
+	mux.HandleFunc(azureWS+"/storage/sasUri", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer aad-token-1" || r.URL.Query().Get("api-version") != azureAPIVersion {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			ContainerName string `json:"containerName"`
+			BlobName      string `json:"blobName"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		u := f.srv.URL + "/blob/" + req.ContainerName
+		if req.BlobName != "" {
+			u += "/" + req.BlobName
+		}
+		json.NewEncoder(w).Encode(map[string]string{"sasUri": u + "?sig=SAS"})
+	})
+	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PUT" && r.Header.Get("x-ms-blob-type") == "BlockBlob":
+			b, _ := io.ReadAll(r.Body)
+			f.uploaded = string(b)
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/rawOutputData"):
+			w.Write([]byte(f.resultBody))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
 		}
 	})
-	srv := httptest.NewServer(mux)
-	return srv, &lastJobID
-}
-
-// TestRunAzure_KnownGoodFixture exercises the full AAD-auth -> submit ->
-// poll -> results flow, including azureSubmit's fallback to its
-// locally-generated job ID when the PUT response echoes no "id" field
-// (which the real Azure Quantum API sometimes does).
-func TestRunAzure_KnownGoodFixture(t *testing.T) {
-	pollCount := 0
-	var srv *httptest.Server
-	srv, jobIDPtr := newAzureMux(t,
-		func(w http.ResponseWriter, r *http.Request, jobID string) {
-			w.Write([]byte(`{}`)) // no "id" field -> RunAzure must fall back
-		},
-		func(w http.ResponseWriter, r *http.Request, jobID string) {
-			pollCount++
-			if pollCount == 1 {
-				w.Write([]byte(`{"status": "Succeeded"}`))
+	mux.HandleFunc(azureWS+"/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, azureWS+"/jobs/")
+		switch r.Method {
+		case "PUT":
+			if f.putStatus != 0 {
+				w.WriteHeader(f.putStatus)
+				w.Write([]byte(`{"error": {"message": "invalid target"}}`))
 				return
 			}
-			w.Write([]byte(`{"outputDataUri": "` + srv.URL + `/blobs/result.json"}`))
-		},
-	)
-	defer srv.Close()
-	mux := srv.Config.Handler.(*http.ServeMux)
-	mux.HandleFunc("/blobs/result.json", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"histogram": {"00": 3, "11": 5}}`))
+			f.jobID = id
+			json.NewDecoder(r.Body).Decode(&f.job)
+			w.Write([]byte(`{}`))
+		case "GET":
+			json.NewEncoder(w).Encode(map[string]any{
+				"status":        f.status,
+				"outputDataUri": f.srv.URL + "/blob/job-" + id + "/rawOutputData?sig=SAS",
+				"errorData":     map[string]string{"message": f.errMsg},
+			})
+		}
 	})
+	f.srv = httptest.NewServer(mux)
+	t.Cleanup(f.srv.Close)
+	return f
+}
 
-	cfg := validAzureCfg(srv.URL)
-	got, err := RunAzure(cfg, "OPENQASM 3;")
+func TestRunAzure_UploadsInputThenCreatesJob(t *testing.T) {
+	f := newAzureFake(t)
+	got, err := RunAzure(validAzureCfg(f.srv.URL), "OPENQASM 2.0; qreg q[2];")
 	if err != nil {
 		t.Fatalf("RunAzure: %v", err)
 	}
-	if *jobIDPtr == "" {
-		t.Fatal("no job ID was ever submitted")
+	if f.uploaded != "OPENQASM 2.0; qreg q[2];" {
+		t.Errorf("uploaded blob = %q", f.uploaded)
 	}
-	if got.JobID != *jobIDPtr {
-		t.Errorf("JobID = %q, want the fallback-generated id %q (submit response had no \"id\" field)", got.JobID, *jobIDPtr)
+	if len(f.jobID) != 36 || got.JobID != f.jobID {
+		t.Errorf("job id = %q (result %q), want a UUID", f.jobID, got.JobID)
 	}
-	if got.Counts["00"] != 3 || got.Counts["11"] != 5 || len(got.Counts) != 2 {
-		t.Errorf("Counts = %v, want {00:3, 11:5}", got.Counts)
+	if f.job["providerId"] != "quantinuum" || f.job["itemType"] != "Job" || f.job["inputDataFormat"] != "honeywell.openqasm.v1" {
+		t.Errorf("job body = %v", f.job)
+	}
+	if !strings.Contains(f.job["containerUri"].(string), "/blob/job-"+f.jobID+"?") ||
+		!strings.Contains(f.job["inputDataUri"].(string), "/blob/job-"+f.jobID+"/inputData?") {
+		t.Errorf("container/input URIs = %v / %v", f.job["containerUri"], f.job["inputDataUri"])
+	}
+	if _, inline := f.job["inputData"]; inline {
+		t.Error("circuit must be uploaded, not inlined")
+	}
+	if got.Counts["00"] != 1 || got.Counts["11"] != 2 {
+		t.Errorf("Counts = %v", got.Counts)
 	}
 }
 
-func TestRunAzure_SubmitResponseIDIsUsedWhenPresent(t *testing.T) {
-	pollCount := 0
-	var srv *httptest.Server
-	srv, _ = newAzureMux(t,
-		func(w http.ResponseWriter, r *http.Request, jobID string) {
-			w.Write([]byte(`{"id": "explicit-id-1"}`))
-		},
-		func(w http.ResponseWriter, r *http.Request, jobID string) {
-			pollCount++
-			if pollCount == 1 {
-				w.Write([]byte(`{"status": "Succeeded"}`))
-				return
-			}
-			w.Write([]byte(`{"outputDataUri": "` + srv.URL + `/blobs2/result.json"}`))
-		},
-	)
-	defer srv.Close()
-	mux := srv.Config.Handler.(*http.ServeMux)
-	mux.HandleFunc("/blobs2/result.json", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"histogram": {"01": 1}}`))
-	})
-
-	cfg := validAzureCfg(srv.URL)
-	got, err := RunAzure(cfg, "OPENQASM 3;")
+func TestRunAzure_ExtraOverridesFormats(t *testing.T) {
+	f := newAzureFake(t)
+	f.resultBody = `{"histogram": {"0": 0.25, "1": 0.75}}`
+	cfg := validAzureCfg(f.srv.URL)
+	cfg.Target = "ionq.simulator"
+	cfg.Shots = 100
+	cfg.Extra = map[string]string{"inputDataFormat": "ionq.circuit.v1", "outputDataFormat": "ionq.quantum-results.v1"}
+	got, err := RunAzure(cfg, "{}")
 	if err != nil {
 		t.Fatalf("RunAzure: %v", err)
 	}
-	if got.JobID != "explicit-id-1" {
-		t.Errorf("JobID = %q, want explicit-id-1 (the id explicitly returned by the submit response)", got.JobID)
+	if f.job["inputDataFormat"] != "ionq.circuit.v1" || f.job["outputDataFormat"] != "ionq.quantum-results.v1" {
+		t.Errorf("formats = %v / %v", f.job["inputDataFormat"], f.job["outputDataFormat"])
+	}
+	params, _ := f.job["inputParams"].(map[string]any)
+	if _, leaked := params["inputDataFormat"]; leaked {
+		t.Error("format overrides must not be sent as inputParams")
+	}
+	if got.Counts["0"] != 25 || got.Counts["1"] != 75 {
+		t.Errorf("probability histogram counts = %v", got.Counts)
 	}
 }
 
 func TestRunAzure_JobFailedSurfacesError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2/v2.0/token", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"access_token": "aad-token-1"}`))
-	})
-	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "PUT":
-			w.Write([]byte(`{}`))
-		case "GET":
-			w.Write([]byte(`{"status": "Failed", "errorData": {"message": "target unavailable"}}`))
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cfg := validAzureCfg(srv.URL)
-	_, err := RunAzure(cfg, "OPENQASM 3;")
+	f := newAzureFake(t)
+	f.status, f.errMsg = "Failed", "target unavailable"
+	_, err := RunAzure(validAzureCfg(f.srv.URL), "OPENQASM 2.0;")
 	if err == nil {
 		t.Fatal("expected an error when the job reaches Failed status")
 	}
 }
 
 func TestRunAzure_JobCancelledSurfacesError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2/v2.0/token", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"access_token": "aad-token-1"}`))
-	})
-	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "PUT":
-			w.Write([]byte(`{}`))
-		case "GET":
-			w.Write([]byte(`{"status": "Cancelled"}`))
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cfg := validAzureCfg(srv.URL)
-	_, err := RunAzure(cfg, "OPENQASM 3;")
-	if err == nil {
+	f := newAzureFake(t)
+	f.status = "Cancelled"
+	if _, err := RunAzure(validAzureCfg(f.srv.URL), "OPENQASM 2.0;"); err == nil {
 		t.Fatal("expected an error when the job reaches Cancelled status")
 	}
 }
@@ -232,29 +228,23 @@ func TestRunAzure_AuthHTTPErrorSurfaces(t *testing.T) {
 		w.Write([]byte(`{"error": "invalid_client", "error_description": "bad secret"}`))
 	}))
 	defer srv.Close()
-
-	cfg := validAzureCfg(srv.URL)
-	_, err := RunAzure(cfg, "OPENQASM 3;")
-	if err == nil {
+	if _, err := RunAzure(validAzureCfg(srv.URL), "OPENQASM 2.0;"); err == nil {
 		t.Fatal("expected an error when the AAD token exchange fails")
 	}
 }
 
 func TestRunAzure_SubmitHTTPErrorSurfaces(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2/v2.0/token", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"access_token": "aad-token-1"}`))
-	})
-	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error": {"message": "invalid target"}}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cfg := validAzureCfg(srv.URL)
-	_, err := RunAzure(cfg, "OPENQASM 3;")
-	if err == nil {
+	f := newAzureFake(t)
+	f.putStatus = http.StatusBadRequest
+	if _, err := RunAzure(validAzureCfg(f.srv.URL), "OPENQASM 2.0;"); err == nil {
 		t.Fatal("expected an error for a non-2xx submit response")
+	}
+}
+
+func TestAzureWorkspaceBase_UsesRegionalEndpoint(t *testing.T) {
+	cfg := validAzureCfg("")
+	want := "https://eastus.quantum.azure.com" + azureWS
+	if got := azureWorkspaceBase(cfg); got != want {
+		t.Fatalf("base = %s, want %s", got, want)
 	}
 }
