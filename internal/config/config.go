@@ -73,7 +73,7 @@ type AWSConfig struct {
 	// Region) and the S3 results base. Empty (the default for every real
 	// caller) uses the real Braket/S3 hosts; used by contract tests to
 	// point RunBraket at a single httptest server.
-	BaseURL string `yaml:"base_url"`
+	BaseURL     string             `yaml:"base_url"`
 	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
@@ -88,19 +88,22 @@ type GCPConfig struct {
 	// contract tests to point RunGoogle at an httptest server. (The OAuth2
 	// token endpoint is separately overridable via the service account
 	// JSON's own token_uri field.)
-	BaseURL string `yaml:"base_url"`
+	BaseURL     string             `yaml:"base_url"`
 	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
 type RigettiConfig struct {
-	APIKey string            `yaml:"api_key"`
-	Device string            `yaml:"device"`
-	Shots  int               `yaml:"shots"`
-	Extra  map[string]string `yaml:"extra"`
+	APIKey string `yaml:"api_key"`
+	Device string `yaml:"device"`
+	Shots  int    `yaml:"shots"`
+	// ProgramFormat selects the direct Rigetti program. Empty and "quil"
+	// send Quil. "openqasm3" sends the OpenQASM 3 source unchanged.
+	ProgramFormat string            `yaml:"program_format"`
+	Extra         map[string]string `yaml:"extra"`
 	// BaseURL overrides the Rigetti QCS API base URL. Empty (the default
 	// for every real caller) uses the public endpoint; used by contract
 	// tests to point RunRigetti at an httptest server.
-	BaseURL string `yaml:"base_url"`
+	BaseURL     string             `yaml:"base_url"`
 	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
@@ -112,7 +115,7 @@ type IonQConfig struct {
 	// BaseURL overrides the IonQ Cloud API base URL. Empty (the default
 	// for every real caller) uses the public endpoint; used by contract
 	// tests to point RunIonQ at an httptest server.
-	BaseURL string `yaml:"base_url"`
+	BaseURL     string             `yaml:"base_url"`
 	OnSubmitted func(jobID string) `yaml:"-"`
 }
 
@@ -131,7 +134,7 @@ type AzureConfig struct {
 	// and the regional data-plane host (normally https://{Location}.quantum.azure.com).
 	// Empty (the default for every real caller) uses the real hosts; used
 	// by contract tests to point RunAzure at a single httptest server.
-	BaseURL string `yaml:"base_url"`
+	BaseURL     string             `yaml:"base_url"`
 	OnSubmitted func(jobID string) `yaml:"-"`
 }
 

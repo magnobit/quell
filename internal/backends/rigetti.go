@@ -9,14 +9,14 @@ import (
 	"net/http"
 
 	"github.com/magnobit/quell/internal/config"
+	"github.com/magnobit/quell/internal/targetfmt"
 )
 
 // Rigetti's production stack (Quantum Cloud Services) is normally accessed
-// through pyQuil, which talks to devices via a gRPC translation layer
-// (Quil-T), not a plain REST job API. This adapter targets the public REST
-// job-submission surface Rigetti exposes for QCS, modeled with the same
-// submit → poll → results shape as the other backends in this package so
-// every adapter presents one consistent interface.
+// through pyQuil. This adapter keeps the same submit, poll, and results
+// shape as the other backends. program_format quil (the default) sends
+// targetfmt.RigettiQuil, the same text Azure Quantum uploads for
+// rigetti.sim.qvm. program_format openqasm3 sends the OpenQASM 3 source.
 const rigettiBase = "https://api.qcs.rigetti.com/v1"
 
 // RunRigetti submits a circuit to Rigetti QCS and returns measurement counts.
@@ -35,8 +35,12 @@ func RunRigetti(cfg *config.RigettiConfig, qasm3 string) (*RunResult, error) {
 	if cfg.BaseURL != "" {
 		base = cfg.BaseURL
 	}
+	format, source, extra, err := rigettiProgram(qasm3, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("rigetti: %w", err)
+	}
 
-	jobID, err := rigettiSubmit(base, cfg.APIKey, cfg.Device, qasm3, shots, cfg.Extra)
+	jobID, err := rigettiSubmit(base, cfg.APIKey, cfg.Device, format, source, shots, extra)
 	if err != nil {
 		return nil, fmt.Errorf("rigetti: submit: %w", err)
 	}
@@ -60,13 +64,32 @@ func RunRigetti(cfg *config.RigettiConfig, qasm3 string) (*RunResult, error) {
 	}, nil
 }
 
-func rigettiSubmit(base, apiKey, device, qasm3 string, shots int, extra map[string]string) (string, error) {
+func rigettiProgram(qasm3 string, cfg *config.RigettiConfig) (format, source string, extra map[string]string, err error) {
+	extra = make(map[string]string, len(cfg.Extra))
+	for k, v := range cfg.Extra {
+		extra[k] = v
+	}
+	chosen := cfg.ProgramFormat
+	if chosen == "" {
+		if v, ok := extra["program_format"]; ok {
+			chosen = v
+		} else if v, ok := extra["programFormat"]; ok {
+			chosen = v
+		}
+	}
+	delete(extra, "program_format")
+	delete(extra, "programFormat")
+	format, source, err = targetfmt.RigettiProgram(qasm3, chosen)
+	return format, source, extra, err
+}
+
+func rigettiSubmit(base, apiKey, device, format, source string, shots int, extra map[string]string) (string, error) {
 	payload := map[string]any{
 		"quantumProcessorId": device,
 		"shots":              shots,
 		"program": map[string]any{
-			"format": "openqasm3",
-			"source": qasm3,
+			"format": format,
+			"source": source,
 		},
 	}
 	mergeExtra(payload, extra)
@@ -133,10 +156,14 @@ func rigettiResults(base, apiKey, jobID string) (map[string]int, error) {
 	var r struct {
 		Counts map[string]int `json:"counts"`
 	}
-	if err := json.Unmarshal(raw, &r); err != nil || r.Counts == nil {
-		return nil, fmt.Errorf("unrecognised result format: %s", string(raw))
+	if err := json.Unmarshal(raw, &r); err == nil && r.Counts != nil {
+		return r.Counts, nil
 	}
-	return r.Counts, nil
+	// Quil readout memory, the same shape Azure returns for rigetti.quil-results.v1.
+	if counts, err := parseAzureResults(raw, 0); err == nil {
+		return counts, nil
+	}
+	return nil, fmt.Errorf("unrecognised result format: %s", string(raw))
 }
 
 func rigettiDo(method, url, apiKey string, body []byte) (*http.Response, error) {

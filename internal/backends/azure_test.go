@@ -73,6 +73,19 @@ func TestRunAzure_MissingTargetRejectedBeforeHTTP(t *testing.T) {
 	}
 }
 
+func TestAzureSASURI_ExplainsStorageIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"code":"ManagedIdentityForbiddenStorageAccess","message":"cannot access storage"}}`))
+	}))
+	defer srv.Close()
+	cfg := validAzureCfg(srv.URL)
+	_, err := azureSASURI("tok", cfg, "job-1", "inputData")
+	if err == nil || !strings.Contains(err.Error(), "linked storage account") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestRunAzure_ProviderWithoutQASMFormatRejected(t *testing.T) {
 	cfg := validAzureCfg("")
 	cfg.Target = "ionq.simulator"
@@ -161,7 +174,7 @@ func TestRunAzure_UploadsInputThenCreatesJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAzure: %v", err)
 	}
-	if f.uploaded != "OPENQASM 2.0; qreg q[2];" {
+	if !strings.Contains(f.uploaded, "OPENQASM 2.0;") || !strings.Contains(f.uploaded, "qreg q[2];") || !strings.Contains(f.uploaded, "measure q -> c;") {
 		t.Errorf("uploaded blob = %q", f.uploaded)
 	}
 	if len(f.jobID) != 36 || got.JobID != f.jobID {
@@ -202,6 +215,53 @@ func TestRunAzure_ExtraOverridesFormats(t *testing.T) {
 	}
 	if got.Counts["0"] != 25 || got.Counts["1"] != 75 {
 		t.Errorf("probability histogram counts = %v", got.Counts)
+	}
+	if f.uploaded != "{}" {
+		t.Errorf("prepared body was rewritten: %q", f.uploaded)
+	}
+}
+
+func TestRunAzure_TranslatesRigettiAndPasqal(t *testing.T) {
+	bell := "OPENQASM 3;\nqubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n"
+	f := newAzureFake(t)
+	cfg := validAzureCfg(f.srv.URL)
+	cfg.Target = "rigetti.sim.qvm"
+	if _, err := RunAzure(cfg, bell); err != nil {
+		t.Fatalf("rigetti: %v", err)
+	}
+	if f.job["inputDataFormat"] != "rigetti.quil.v1" || f.job["outputDataFormat"] != "rigetti.quil-results.v1" {
+		t.Fatalf("rigetti formats = %v / %v", f.job["inputDataFormat"], f.job["outputDataFormat"])
+	}
+	if !strings.Contains(f.uploaded, "DECLARE ro BIT[2]") || !strings.Contains(f.uploaded, "H 0") || !strings.Contains(f.uploaded, "CNOT 0 1") {
+		t.Fatalf("rigetti body = %q", f.uploaded)
+	}
+
+	f = newAzureFake(t)
+	f.resultBody = `{"counter": {"00": 1, "11": 3}}`
+	cfg = validAzureCfg(f.srv.URL)
+	cfg.Target = "pasqal.sim.emu-free"
+	got, err := RunAzure(cfg, bell)
+	if err != nil {
+		t.Fatalf("pasqal: %v", err)
+	}
+	if f.job["inputDataFormat"] != "pasqal.pulser.v1" || f.job["outputDataFormat"] != "pasqal.pulser-results.v1" {
+		t.Fatalf("pasqal formats = %v / %v", f.job["inputDataFormat"], f.job["outputDataFormat"])
+	}
+	if !strings.Contains(f.uploaded, `"sequence_builder"`) || !strings.Contains(f.uploaded, `"rydberg_local"`) {
+		t.Fatalf("pasqal body = %q", f.uploaded)
+	}
+	if got.Counts["00"] != 1 || got.Counts["11"] != 3 {
+		t.Fatalf("pasqal counts = %v", got.Counts)
+	}
+}
+
+func TestParseAzureResults_RigettiShots(t *testing.T) {
+	counts, err := parseAzureResults([]byte(`{"ro":[[0,0],[1,1],[1,1]]}`), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["00"] != 1 || counts["11"] != 2 {
+		t.Fatalf("counts = %v", counts)
 	}
 }
 

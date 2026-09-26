@@ -13,19 +13,13 @@ import (
 	"strings"
 
 	"github.com/magnobit/quell/internal/config"
+	"github.com/magnobit/quell/internal/targetfmt"
 )
 
 const (
 	azureScope      = "https://quantum.microsoft.com/.default"
 	azureAPIVersion = "2026-01-15-preview"
 )
-
-// azureFormats holds the input and output formats for providers whose
-// Azure targets accept OpenQASM text. Other providers take QIR or their own
-// JSON circuit formats, which Quell does not emit yet.
-var azureFormats = map[string][2]string{
-	"quantinuum": {"honeywell.openqasm.v1", "honeywell.quantum-results.v1"},
-}
 
 // RunAzure submits a circuit to Azure Quantum and returns measurement counts.
 // Auth uses the AAD client-credentials flow (service principal). Following
@@ -53,20 +47,9 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 	for k, v := range cfg.Extra {
 		extra[k] = v
 	}
-	formats := azureFormats[providerID]
-	if v, ok := extra["inputDataFormat"]; ok {
-		formats[0] = v
-		delete(extra, "inputDataFormat")
-	}
-	if v, ok := extra["outputDataFormat"]; ok {
-		formats[1] = v
-		delete(extra, "outputDataFormat")
-	}
-	if formats[0] == "" {
-		return nil, fmt.Errorf("azure: %s targets do not accept OpenQASM; set extra inputDataFormat if this target takes a text circuit format", providerID)
-	}
-	if formats[1] == "" {
-		formats[1] = "microsoft.quantum-results.v1"
+	input, formats, err := azureJobInput(cfg.Target, qasm3, extra)
+	if err != nil {
+		return nil, err
 	}
 
 	token, err := azureAccessToken(azureTokenURL(cfg), cfg.ClientID, cfg.ClientSecret)
@@ -75,7 +58,7 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 	}
 	fmt.Println("  Azure AAD auth OK")
 
-	jobID, err := azureSubmit(token, cfg, providerID, formats, qasm3, shots, extra)
+	jobID, err := azureSubmit(token, cfg, providerID, formats, input, shots, extra)
 	if err != nil {
 		return nil, fmt.Errorf("azure: submit: %w", err)
 	}
@@ -163,6 +146,9 @@ func azureSASURI(token string, cfg *config.AzureConfig, container, blob string) 
 	body, _ := json.Marshal(req)
 	resp, err := azureDo("POST", azureWorkspaceBase(cfg)+"/storage/sasUri?api-version="+azureAPIVersion, token, body)
 	if err != nil {
+		if strings.Contains(err.Error(), "ManagedIdentityForbiddenStorageAccess") {
+			return "", fmt.Errorf("%w — grant the workspace managed identity access to its linked storage account, then wait a few minutes", err)
+		}
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -194,7 +180,35 @@ func azureUploadBlob(sasURI string, data []byte) error {
 	return nil
 }
 
-func azureSubmit(token string, cfg *config.AzureConfig, providerID string, formats [2]string, qasm3 string, shots int, extra map[string]string) (string, error) {
+// azureJobInput turns OpenQASM into the provider body Azure uploads.
+// An explicit inputDataFormat keeps the source bytes unchanged so a caller
+// can still send a prepared payload.
+func azureJobInput(target, qasm3 string, extra map[string]string) ([]byte, [2]string, error) {
+	var formats [2]string
+	if v, ok := extra["outputDataFormat"]; ok {
+		formats[1] = v
+		delete(extra, "outputDataFormat")
+	}
+	if v, ok := extra["inputDataFormat"]; ok {
+		formats[0] = v
+		delete(extra, "inputDataFormat")
+		if formats[1] == "" {
+			formats[1] = "microsoft.quantum-results.v1"
+		}
+		return []byte(qasm3), formats, nil
+	}
+	payload, err := targetfmt.Azure(target, qasm3)
+	if err != nil {
+		return nil, formats, fmt.Errorf("azure: %w", err)
+	}
+	formats[0] = payload.InputFormat
+	if formats[1] == "" {
+		formats[1] = payload.OutputFormat
+	}
+	return payload.Body, formats, nil
+}
+
+func azureSubmit(token string, cfg *config.AzureConfig, providerID string, formats [2]string, input []byte, shots int, extra map[string]string) (string, error) {
 	jobID, err := newUUID()
 	if err != nil {
 		return "", err
@@ -204,7 +218,7 @@ func azureSubmit(token string, cfg *config.AzureConfig, providerID string, forma
 	if err != nil {
 		return "", err
 	}
-	if err := azureUploadBlob(inputURI, []byte(qasm3)); err != nil {
+	if err := azureUploadBlob(inputURI, input); err != nil {
 		return "", err
 	}
 	containerURI, err := azureSASURI(token, cfg, container, "")
@@ -327,6 +341,40 @@ func parseAzureResults(raw []byte, shots int) (map[string]int, error) {
 		}
 		if len(counts) > 0 {
 			return counts, nil
+		}
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) == nil {
+		if rawCounter, ok := doc["counter"]; ok {
+			var counter map[string]float64
+			if json.Unmarshal(rawCounter, &counter) == nil && len(counter) > 0 {
+				counts := make(map[string]int, len(counter))
+				for bits, n := range counter {
+					counts[bits] = int(math.Round(n))
+				}
+				return counts, nil
+			}
+		}
+		for _, rawReg := range doc {
+			var shots2 [][]float64
+			if json.Unmarshal(rawReg, &shots2) != nil || len(shots2) == 0 {
+				continue
+			}
+			counts := map[string]int{}
+			for _, shot := range shots2 {
+				var bits strings.Builder
+				for _, bit := range shot {
+					if bit >= 0.5 {
+						bits.WriteByte('1')
+					} else {
+						bits.WriteByte('0')
+					}
+				}
+				counts[bits.String()]++
+			}
+			if len(counts) > 0 {
+				return counts, nil
+			}
 		}
 	}
 	return nil, fmt.Errorf("unrecognised result format: %s", string(raw))
