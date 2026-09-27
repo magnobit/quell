@@ -3,6 +3,7 @@
 package targetfmt
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -35,10 +36,16 @@ func TestBellTranslations(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(pulser)
-	for _, want := range []string{`"sequence_builder"`, `"raman_local"`, `"rydberg_local"`, `"q0"`, `"q1"`} {
+	for _, want := range []string{
+		`"sequence_builder"`, `"raman_local"`, `"rydberg_local"`, `"q0"`, `"q1"`,
+		`"name":"DigitalAnalogDevice"`, `"measurement":"digital"`, `"protocol":"min-delay"`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("pasqal missing %q in %s", want, body)
 		}
+	}
+	if strings.Contains(body, `"protocol":"const"`) {
+		t.Fatalf("pasqal still uses invalid protocol const")
 	}
 
 	job, err := Azure("quantinuum.sim.h2-1sc", bellQASM)
@@ -47,6 +54,63 @@ func TestBellTranslations(t *testing.T) {
 	}
 	if job.Provider != "quantinuum" || job.InputFormat != "honeywell.openqasm.v1" {
 		t.Fatalf("azure payload = %+v", job)
+	}
+}
+
+func TestPasqalPulser_Schema(t *testing.T) {
+	body, err := PasqalPulser(bellQASM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatal(err)
+	}
+	seq, _ := env["sequence_builder"].(map[string]any)
+	if seq == nil {
+		t.Fatalf("envelope = %s", body)
+	}
+	for _, key := range []string{"version", "name", "register", "channels", "variables", "operations", "measurement", "device"} {
+		if _, ok := seq[key]; !ok {
+			t.Fatalf("missing %s in %s", key, body)
+		}
+	}
+	device, _ := seq["device"].(map[string]any)
+	if device["name"] != "DigitalAnalogDevice" || seq["measurement"] != "digital" {
+		t.Fatalf("device=%v measurement=%v", seq["device"], seq["measurement"])
+	}
+	ops, _ := seq["operations"].([]any)
+	if len(ops) == 0 {
+		t.Fatal("no operations")
+	}
+	for _, raw := range ops {
+		op, _ := raw.(map[string]any)
+		if op["op"] == "pulse" && op["protocol"] != "min-delay" {
+			t.Fatalf("pulse protocol = %v", op["protocol"])
+		}
+		if op["op"] == "target" {
+			switch op["target"].(type) {
+			case float64, int:
+			default:
+				t.Fatalf("target must be an index, got %T %v", op["target"], op["target"])
+			}
+		}
+	}
+}
+
+func TestPasqalPulser_SingleQubitOmitsRydberg(t *testing.T) {
+	body, err := PasqalPulser("OPENQASM 3;\nqubit[1] q;\nbit[1] c;\nh q[0];\nc = measure q;\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatal(err)
+	}
+	seq, _ := env["sequence_builder"].(map[string]any)
+	channels, _ := seq["channels"].(map[string]any)
+	if _, ok := channels["rydberg"]; ok || len(channels) != 1 || channels["digital"] != "raman_local" {
+		t.Fatalf("channels = %v", channels)
 	}
 }
 

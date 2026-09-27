@@ -67,6 +67,9 @@ func RunAzure(cfg *config.AzureConfig, qasm3 string) (*RunResult, error) {
 
 	outputURI, err := azurePoll(token, cfg, jobID)
 	if err != nil {
+		if strings.Contains(err.Error(), "infer the 'one state'") {
+			return nil, fmt.Errorf("%w — pasqal.sim.emu-free cannot sample a mixed digital+Rydberg sequence (CX/CZ); a single-qubit circuit on this free target succeeds", err)
+		}
 		return nil, fmt.Errorf("azure: %w", err)
 	}
 
@@ -277,6 +280,12 @@ func azureSubmit(token string, cfg *config.AzureConfig, providerID string, forma
 	}
 
 	inputParams := map[string]any{"shots": shots, "count": shots}
+	if providerID == "pasqal" {
+		inputParams["runs"] = shots
+		// EMU_FREE samples a 3-level (r,g,h) state after digital+Rydberg
+		// sequences and cannot infer |1> unless we name it.
+		inputParams["one_state"] = "h"
+	}
 	mergeExtra(inputParams, extra)
 
 	body, _ := json.Marshal(map[string]any{
