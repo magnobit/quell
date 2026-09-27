@@ -100,6 +100,7 @@ func TestRunAzure_ProviderWithoutQASMFormatRejected(t *testing.T) {
 type azureFake struct {
 	srv          *httptest.Server
 	uploaded     string
+	uploadedType string
 	created      map[string]bool
 	createCalled bool
 	job          map[string]any
@@ -152,6 +153,7 @@ func newAzureFake(t *testing.T) *azureFake {
 			}
 			b, _ := io.ReadAll(r.Body)
 			f.uploaded = string(b)
+			f.uploadedType = r.Header.Get("Content-Type")
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/rawOutputData"):
 			w.Write([]byte(f.resultBody))
@@ -254,6 +256,9 @@ func TestRunAzure_TranslatesRigettiAndPasqal(t *testing.T) {
 	if !strings.Contains(f.uploaded, "DECLARE ro BIT[2]") || !strings.Contains(f.uploaded, "H 0") || !strings.Contains(f.uploaded, "CNOT 0 1") {
 		t.Fatalf("rigetti body = %q", f.uploaded)
 	}
+	if f.uploadedType != "text/plain" {
+		t.Fatalf("rigetti content-type = %q", f.uploadedType)
+	}
 
 	f = newAzureFake(t)
 	f.resultBody = `{"counter": {"00": 1, "11": 3}}`
@@ -268,6 +273,9 @@ func TestRunAzure_TranslatesRigettiAndPasqal(t *testing.T) {
 	}
 	if !strings.Contains(f.uploaded, `"sequence_builder"`) || !strings.Contains(f.uploaded, `"rydberg_local"`) {
 		t.Fatalf("pasqal body = %q", f.uploaded)
+	}
+	if f.uploadedType != "application/json" {
+		t.Fatalf("pasqal content-type = %q", f.uploadedType)
 	}
 	if got.Counts["00"] != 1 || got.Counts["11"] != 3 {
 		t.Fatalf("pasqal counts = %v", got.Counts)

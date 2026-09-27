@@ -198,13 +198,23 @@ func azureWithQuery(raw, key, value string) string {
 	return raw + sep + url.QueryEscape(key) + "=" + url.QueryEscape(value)
 }
 
-func azureUploadBlob(sasURI string, data []byte) error {
+func azureBlobContentType(inputFormat string) string {
+	if strings.HasPrefix(inputFormat, "pasqal.") {
+		return "application/json"
+	}
+	return "text/plain"
+}
+
+func azureUploadBlob(sasURI string, data []byte, contentType string) error {
 	req, err := http.NewRequest(http.MethodPut, sasURI, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
+	if contentType == "" {
+		contentType = "text/plain"
+	}
 	req.Header.Set("x-ms-blob-type", "BlockBlob")
-	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Content-Type", contentType)
 	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return &ProviderError{Provider: "azure", Class: classifyNet(err), Message: "upload input: " + redactSecrets(err.Error())}
@@ -262,7 +272,7 @@ func azureSubmit(token string, cfg *config.AzureConfig, providerID string, forma
 	if err != nil {
 		return "", err
 	}
-	if err := azureUploadBlob(inputURI, input); err != nil {
+	if err := azureUploadBlob(inputURI, input, azureBlobContentType(formats[0])); err != nil {
 		return "", err
 	}
 
