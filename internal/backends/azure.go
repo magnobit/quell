@@ -282,9 +282,13 @@ func azureSubmit(token string, cfg *config.AzureConfig, providerID string, forma
 	inputParams := map[string]any{"shots": shots, "count": shots}
 	if providerID == "pasqal" {
 		inputParams["runs"] = shots
-		// EMU_FREE samples a 3-level (r,g,h) state after digital+Rydberg
-		// sequences and cannot infer |1> unless we name it.
-		inputParams["one_state"] = "h"
+		// |1> is hyperfine (h) on a Raman sequence and Rydberg (r) on a
+		// ground-rydberg sequence. emu-free ignores this when the sequence
+		// mixes both and the eigenstates are (r, g, h).
+		inputParams["one_state"] = "r"
+		if bytes.Contains(input, []byte(`"digital":"raman_local"`)) {
+			inputParams["one_state"] = "h"
+		}
 	}
 	mergeExtra(inputParams, extra)
 

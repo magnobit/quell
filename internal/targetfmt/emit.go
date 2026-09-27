@@ -184,10 +184,15 @@ func quil(g Gate) (string, error) {
 // PasqalPulser emits the pasqal.pulser.v1 JSON envelope.
 // A direct Pasqal connection sends this same document.
 //
-// Single-qubit gates become local Raman pulses. H is RY(π/2) then RX(π),
-// which equals H up to a global phase. CX is H on the target, a local
-// Rydberg CZ, then H again. Atoms sit 5 µm apart so a pairwise Rydberg
-// pulse blockades that pair and not the next atom in the line.
+// Single-qubit circuits stay on the Raman channel and measure the digital
+// basis, which emu-free can sample. A circuit with CX, CZ, or SWAP stays
+// entirely on the Rydberg channel and measures ground-rydberg, so the
+// emulator sees eigenstates (r, g) and can infer |1>. Mixing the two
+// channels produces (r, g, h); pasqal.sim.emu-free then fails at sampling
+// even though the job was accepted. H is RY(π/2) then RX(π), which equals
+// H up to a global phase. CX is that H on the target, a local Rydberg CZ,
+// then H again. Atoms sit 5 µm apart so a pairwise Rydberg pulse blockades
+// that pair and not the next atom in the line.
 func PasqalPulser(openQASM string) ([]byte, error) {
 	c, err := ParseOpenQASM(openQASM)
 	if err != nil {

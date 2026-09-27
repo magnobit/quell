@@ -274,14 +274,17 @@ func TestRunAzure_TranslatesRigettiAndPasqal(t *testing.T) {
 	if !strings.Contains(f.uploaded, `"sequence_builder"`) || !strings.Contains(f.uploaded, `"rydberg_local"`) {
 		t.Fatalf("pasqal body = %q", f.uploaded)
 	}
-	if !strings.Contains(f.uploaded, `"name":"DigitalAnalogDevice"`) || !strings.Contains(f.uploaded, `"measurement":"digital"`) || !strings.Contains(f.uploaded, `"protocol":"min-delay"`) {
+	if !strings.Contains(f.uploaded, `"name":"DigitalAnalogDevice"`) || !strings.Contains(f.uploaded, `"measurement":"ground-rydberg"`) || !strings.Contains(f.uploaded, `"protocol":"min-delay"`) {
 		t.Fatalf("pasqal schema = %q", f.uploaded)
+	}
+	if strings.Contains(f.uploaded, `"digital":"raman_local"`) {
+		t.Fatalf("pasqal bell used the Raman channel: %s", f.uploaded)
 	}
 	if f.uploadedType != "application/json" {
 		t.Fatalf("pasqal content-type = %q", f.uploadedType)
 	}
 	params, _ := f.job["inputParams"].(map[string]any)
-	if params["one_state"] != "h" {
+	if params["one_state"] != "r" {
 		t.Fatalf("pasqal inputParams = %v", params)
 	}
 	if got.Counts["00"] != 1 || got.Counts["11"] != 3 {

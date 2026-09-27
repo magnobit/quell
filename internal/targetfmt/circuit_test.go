@@ -37,12 +37,15 @@ func TestBellTranslations(t *testing.T) {
 	}
 	body := string(pulser)
 	for _, want := range []string{
-		`"sequence_builder"`, `"raman_local"`, `"rydberg_local"`, `"q0"`, `"q1"`,
-		`"name":"DigitalAnalogDevice"`, `"measurement":"digital"`, `"protocol":"min-delay"`,
+		`"sequence_builder"`, `"rydberg_local"`, `"q0"`, `"q1"`,
+		`"name":"DigitalAnalogDevice"`, `"measurement":"ground-rydberg"`, `"protocol":"min-delay"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("pasqal missing %q in %s", want, body)
 		}
+	}
+	if strings.Contains(body, `"digital":"raman_local"`) {
+		t.Fatalf("entangling pasqal sequence must not use the Raman channel: %s", body)
 	}
 	if strings.Contains(body, `"protocol":"const"`) {
 		t.Fatalf("pasqal still uses invalid protocol const")
@@ -76,8 +79,12 @@ func TestPasqalPulser_Schema(t *testing.T) {
 		}
 	}
 	device, _ := seq["device"].(map[string]any)
-	if device["name"] != "DigitalAnalogDevice" || seq["measurement"] != "digital" {
+	if device["name"] != "DigitalAnalogDevice" || seq["measurement"] != "ground-rydberg" {
 		t.Fatalf("device=%v measurement=%v", seq["device"], seq["measurement"])
+	}
+	channels, _ := seq["channels"].(map[string]any)
+	if _, ok := channels["digital"]; ok || channels["rydberg"] != "rydberg_local" {
+		t.Fatalf("entangling channels = %v", channels)
 	}
 	ops, _ := seq["operations"].([]any)
 	if len(ops) == 0 {

@@ -45,24 +45,38 @@ type pulserBuilder struct {
 	seq           pulserSeq
 	digitalTarget int
 	rydbergTarget int
+	// rotChannel is where single-qubit rotations go. Entangling circuits
+	// use only the Rydberg channel: emu-free cannot sample a sequence that
+	// mixes Raman (g,h) with Rydberg (g,r), because the state is then
+	// (r,g,h) and it cannot infer which eigenstate is |1>.
+	rotChannel string
+	phaseBasis string
 }
 
 func pulserSequence(c *Circuit) (*pulserSeq, error) {
+	rydbergOnly := needsRydberg(c)
 	b := &pulserBuilder{
 		digitalTarget: -1,
 		rydbergTarget: -1,
+		rotChannel:    "digital",
+		phaseBasis:    "digital",
 		seq: pulserSeq{
 			Version:     "1",
 			Name:        "quell",
-			Channels:    map[string]string{"digital": "raman_local"},
+			Channels:    map[string]string{},
 			Variables:   map[string]any{},
 			Measurement: "digital",
 			Device:      pulserDevice(),
 			PulserVer:   "1.9.1",
 		},
 	}
-	if needsRydberg(c) {
+	if rydbergOnly {
+		b.rotChannel = "rydberg"
+		b.phaseBasis = "ground-rydberg"
+		b.seq.Measurement = "ground-rydberg"
 		b.seq.Channels["rydberg"] = "rydberg_local"
+	} else {
+		b.seq.Channels["digital"] = "raman_local"
 	}
 	for i := 0; i < c.Qubits; i++ {
 		b.seq.Register = append(b.seq.Register, pulserQubit{
@@ -72,10 +86,7 @@ func pulserSequence(c *Circuit) (*pulserSeq, error) {
 		})
 	}
 	if c.Qubits > 0 {
-		b.setTarget("digital", 0)
-		if _, ok := b.seq.Channels["rydberg"]; ok {
-			b.setTarget("rydberg", 0)
-		}
+		b.setTarget(b.rotChannel, 0)
 	}
 	for _, g := range c.Gates {
 		if err := b.gate(g); err != nil {
@@ -142,7 +153,7 @@ func (b *pulserBuilder) ry(q int, angle float64) { b.raman(q, angle, math.Pi/2) 
 func (b *pulserBuilder) rz(q int, angle float64) {
 	b.seq.Operations = append(b.seq.Operations, map[string]any{
 		"op":      "phase_shift",
-		"basis":   "digital",
+		"basis":   b.phaseBasis,
 		"phi":     angle,
 		"targets": []int{q},
 	})
@@ -152,8 +163,8 @@ func (b *pulserBuilder) raman(q int, area, phase float64) {
 	if math.Abs(area) < 1e-12 {
 		return
 	}
-	b.setTarget("digital", q)
-	b.pulse("digital", area, phase)
+	b.setTarget(b.rotChannel, q)
+	b.pulse(b.rotChannel, area, phase)
 }
 
 func (b *pulserBuilder) cz(c, t int) {
@@ -210,13 +221,15 @@ func needsRydberg(c *Circuit) bool {
 }
 
 func (b *pulserBuilder) align() {
-	channels := []string{"digital"}
-	if _, ok := b.seq.Channels["rydberg"]; ok {
-		channels = append(channels, "rydberg")
+	if _, digital := b.seq.Channels["digital"]; !digital {
+		return
+	}
+	if _, rydberg := b.seq.Channels["rydberg"]; !rydberg {
+		return
 	}
 	b.seq.Operations = append(b.seq.Operations, map[string]any{
 		"op":       "align",
-		"channels": channels,
+		"channels": []string{"digital", "rydberg"},
 	})
 }
 
