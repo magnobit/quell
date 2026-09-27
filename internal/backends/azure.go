@@ -161,6 +161,43 @@ func azureSASURI(token string, cfg *config.AzureConfig, container, blob string) 
 	return r.SasURI, nil
 }
 
+// azureCreateContainer creates the job container on the linked storage
+// account. A blob SAS for a missing container cannot upload and returns
+// ContainerNotFound.
+func azureCreateContainer(sasURI string) error {
+	req, err := http.NewRequest(http.MethodPut, azureWithQuery(sasURI, "restype", "container"), http.NoBody)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = 0
+	resp, err := providerHTTPClient.Do(req)
+	if err != nil {
+		return &ProviderError{Provider: "azure", Class: classifyNet(err), Message: "create container: " + redactSecrets(err.Error())}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusForbidden {
+		// Azure Quantum already created the container when it minted the
+		// container SAS. A user-delegation SAS cannot create containers.
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return httpStatusError("azure", resp.StatusCode, b)
+	}
+	return nil
+}
+
+func azureWithQuery(raw, key, value string) string {
+	if strings.Contains(raw, key+"=") {
+		return raw
+	}
+	sep := "?"
+	if strings.Contains(raw, "?") {
+		sep = "&"
+	}
+	return raw + sep + url.QueryEscape(key) + "=" + url.QueryEscape(value)
+}
+
 func azureUploadBlob(sasURI string, data []byte) error {
 	req, err := http.NewRequest(http.MethodPut, sasURI, bytes.NewReader(data))
 	if err != nil {
@@ -214,15 +251,18 @@ func azureSubmit(token string, cfg *config.AzureConfig, providerID string, forma
 		return "", err
 	}
 	container := "job-" + jobID
+	containerURI, err := azureSASURI(token, cfg, container, "")
+	if err != nil {
+		return "", err
+	}
+	if err := azureCreateContainer(containerURI); err != nil {
+		return "", err
+	}
 	inputURI, err := azureSASURI(token, cfg, container, "inputData")
 	if err != nil {
 		return "", err
 	}
 	if err := azureUploadBlob(inputURI, input); err != nil {
-		return "", err
-	}
-	containerURI, err := azureSASURI(token, cfg, container, "")
-	if err != nil {
 		return "", err
 	}
 
@@ -244,6 +284,9 @@ func azureSubmit(token string, cfg *config.AzureConfig, providerID string, forma
 
 	resp, err := azureDo("PUT", azureJobURL(cfg, jobID), token, body)
 	if err != nil {
+		if strings.Contains(err.Error(), "not in a valid provisioning state") {
+			return "", fmt.Errorf("%w — that provider is still launching on this workspace; wait until its status is Succeeded, or run on a provider that already succeeded", err)
+		}
 		return "", err
 	}
 	defer resp.Body.Close()

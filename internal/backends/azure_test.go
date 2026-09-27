@@ -98,19 +98,21 @@ func TestRunAzure_ProviderWithoutQASMFormatRejected(t *testing.T) {
 // azureFake is an in-memory Azure Quantum workspace: AAD, storage SAS, blob
 // upload, job create/get, and result blob.
 type azureFake struct {
-	srv        *httptest.Server
-	uploaded   string
-	job        map[string]any
-	jobID      string
-	status     string
-	errMsg     string
-	resultBody string
-	putStatus  int
+	srv          *httptest.Server
+	uploaded     string
+	created      map[string]bool
+	createCalled bool
+	job          map[string]any
+	jobID        string
+	status       string
+	errMsg       string
+	resultBody   string
+	putStatus    int
 }
 
 func newAzureFake(t *testing.T) *azureFake {
 	t.Helper()
-	f := &azureFake{status: "Succeeded", resultBody: `{"c": ["00", "11", "11"]}`}
+	f := &azureFake{status: "Succeeded", resultBody: `{"c": ["00", "11", "11"]}`, created: map[string]bool{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth2/v2.0/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"access_token": "aad-token-1"}`))
@@ -125,6 +127,9 @@ func newAzureFake(t *testing.T) *azureFake {
 			BlobName      string `json:"blobName"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
+		if req.BlobName == "" {
+			f.created[req.ContainerName] = true
+		}
 		u := f.srv.URL + "/blob/" + req.ContainerName
 		if req.BlobName != "" {
 			u += "/" + req.BlobName
@@ -132,8 +137,19 @@ func newAzureFake(t *testing.T) *azureFake {
 		json.NewEncoder(w).Encode(map[string]string{"sasUri": u + "?sig=SAS"})
 	})
 	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/blob/")
+		container, _, _ := strings.Cut(name, "/")
 		switch {
+		case r.Method == "PUT" && r.URL.Query().Get("restype") == "container":
+			f.createCalled = true
+			f.created[container] = true
+			w.WriteHeader(http.StatusCreated)
 		case r.Method == "PUT" && r.Header.Get("x-ms-blob-type") == "BlockBlob":
+			if !f.created[container] {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`<?xml version="1.0"?><Error><Code>ContainerNotFound</Code></Error>`))
+				return
+			}
 			b, _ := io.ReadAll(r.Body)
 			f.uploaded = string(b)
 			w.WriteHeader(http.StatusCreated)
@@ -173,6 +189,9 @@ func TestRunAzure_UploadsInputThenCreatesJob(t *testing.T) {
 	got, err := RunAzure(validAzureCfg(f.srv.URL), "OPENQASM 2.0; qreg q[2];")
 	if err != nil {
 		t.Fatalf("RunAzure: %v", err)
+	}
+	if !f.created["job-"+f.jobID] && !f.createCalled {
+		t.Error("expected a container SAS before the input blob")
 	}
 	if !strings.Contains(f.uploaded, "OPENQASM 2.0;") || !strings.Contains(f.uploaded, "qreg q[2];") || !strings.Contains(f.uploaded, "measure q -> c;") {
 		t.Errorf("uploaded blob = %q", f.uploaded)
