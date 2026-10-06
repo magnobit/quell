@@ -1,0 +1,8 @@
+quantum fn bell(a: qubit, b: qubit) {
+    H a
+    CNOT a, b
+}
+qubit q0
+qubit q1
+bell q0, q1
+MEASURE

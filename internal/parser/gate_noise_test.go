@@ -50,4 +50,11 @@ func TestParse_NOISE(t *testing.T) {
 	if c.NoiseDepolarizing != 0.01 || c.NoiseAmplitudeDamping != 0.05 {
 		t.Fatalf("noise fields = %g / %g", c.NoiseDepolarizing, c.NoiseAmplitudeDamping)
 	}
+	c2, err := parser.Parse("NOISE bit_flip 0.2\nX 0\nMEASURE\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.NoiseBitFlip != 0.2 {
+		t.Fatalf("bit_flip = %g", c2.NoiseBitFlip)
+	}
 }

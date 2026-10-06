@@ -1,0 +1,10 @@
+fn label(ok: bool) -> string {
+    return if ok {
+        "yes"
+    } else {
+        "no"
+    }
+}
+let word: string = label(true)
+H 0
+MEASURE

@@ -5,7 +5,12 @@
 package compile
 
 import (
+	"fmt"
+	"strings"
+
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/compiler"
+	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/optimizer"
 	"github.com/magnobit/quell/internal/parser"
 	"github.com/magnobit/quell/internal/topology"
@@ -48,6 +53,9 @@ type CompileResult struct {
 	// callers (e.g. the CLI) that report it without needing direct access
 	// to the parser.
 	NumInstructions int
+	// Fingerprint identifies this source, target, and optimize flag.
+	// It is empty when the caller did not supply the original source.
+	Fingerprint string
 }
 
 // Compile parses and compiles Quell source to the given target, with the
@@ -76,13 +84,121 @@ func CompileWithWarnings(src string, target Target, optimize bool) (CompileResul
 		log.Error("parse failed", "err", err, "target", string(target))
 		return CompileResult{}, qerr.Wrap(qerr.KindParse, "compile", err)
 	}
+	if err := check.Fail(c); err != nil {
+		return CompileResult{}, err
+	}
 	r, err := compileCircuit(c, target, optimize)
 	if err != nil {
 		log.Error("compile failed", "err", err, "target", string(target), "qubits", c.NumQubits)
 		return CompileResult{}, qerr.Compile("compile", err)
 	}
+	r.Fingerprint = Fingerprint(src, string(target), optimize)
 	log.Debug("compile ok", "target", string(target), "qubits", r.NumQubits, "ops", r.NumInstructions, "warnings", len(r.Warnings))
 	return r, nil
+}
+
+// ResolveTargets parses a target spec. "all" is every supported target.
+// A comma-separated list selects those targets, in that order, without duplicates.
+func ResolveTargets(spec string) ([]Target, error) {
+	spec = strings.TrimSpace(strings.ToLower(spec))
+	if spec == "all" {
+		out := make([]Target, len(Targets))
+		copy(out, Targets)
+		return out, nil
+	}
+	if spec == "" {
+		return nil, fmt.Errorf("empty target")
+	}
+	seen := map[Target]bool{}
+	var out []Target
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		var match Target
+		ok := false
+		for _, t := range Targets {
+			if string(t) == part {
+				match, ok = t, true
+				break
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("unsupported target %q", part)
+		}
+		if !seen[match] {
+			out = append(out, match)
+			seen[match] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty target")
+	}
+	return out, nil
+}
+
+// Emit prints each target from an already-lowered program.
+// Optimization, when requested, runs once and is shared by every target.
+func Emit(prog *ir.Program, targets []Target, optimize bool) (map[Target]CompileResult, error) {
+	if prog == nil {
+		return nil, qerr.Compile("compile", fmt.Errorf("nil program"))
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("empty target")
+	}
+	notes := []string{}
+	if optimize {
+		var optNotes []string
+		prog, optNotes = optimizer.Optimize(prog)
+		if optNotes != nil {
+			notes = optNotes
+		}
+	}
+	out := make(map[Target]CompileResult, len(targets))
+	for _, target := range targets {
+		code, _, err := compiler.CompileProgram(prog, compiler.Target(target), false)
+		if err != nil {
+			return nil, qerr.Compile("compile", err)
+		}
+		out[target] = CompileResult{
+			Code:           code,
+			Warnings:       []string{},
+			OptimizerNotes: notes,
+		}
+	}
+	return out, nil
+}
+
+// CompileMany parses, lowers, and optionally optimizes src once, then
+// emits every target from that same IR. Target order follows targets.
+// Coupling-aware routing is not applied; use CompileWithOptions per
+// target when a backend coupling map is required.
+func CompileMany(src string, targets []Target, optimize bool) (map[Target]CompileResult, error) {
+	c, err := parser.Parse(src)
+	if err != nil {
+		return nil, qerr.Wrap(qerr.KindParse, "compile", err)
+	}
+	if err := check.Fail(c); err != nil {
+		return nil, err
+	}
+	prog := ir.Lower(c)
+	emitted, err := Emit(prog, targets, optimize)
+	if err != nil {
+		return nil, err
+	}
+	warnings := c.Warnings
+	if warnings == nil {
+		warnings = []string{}
+	}
+	for target, result := range emitted {
+		result.Warnings = warnings
+		result.NumQubits = c.NumQubits
+		result.NumInstructions = len(c.Instructions)
+		result.Fingerprint = Fingerprint(src, string(target), optimize)
+		emitted[target] = result
+	}
+	return emitted, nil
 }
 
 // CompileFile parses the .quell file at path — resolving any "import"
@@ -105,6 +221,9 @@ func CompileFileWithWarnings(path string, target Target, optimize bool) (Compile
 	if err != nil {
 		log.Error("parse file failed", "path", path, "err", err)
 		return CompileResult{}, qerr.Wrap(qerr.KindParse, "compile", err)
+	}
+	if err := check.Fail(c); err != nil {
+		return CompileResult{}, err
 	}
 	r, err := compileCircuit(c, target, optimize)
 	if err != nil {
@@ -136,6 +255,9 @@ func CompileWithOptions(src string, target Target, opts CompileOptions) (Compile
 	if err != nil {
 		log.Error("parse failed", "err", err, "target", string(target))
 		return CompileResult{}, qerr.Wrap(qerr.KindParse, "compile", err)
+	}
+	if err := check.Fail(c); err != nil {
+		return CompileResult{}, err
 	}
 	r, err := compileCircuitOpts(c, target, opts)
 	if err != nil {

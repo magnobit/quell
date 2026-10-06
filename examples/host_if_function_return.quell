@@ -1,0 +1,10 @@
+fn abs(x: int) -> int {
+    return if x < 0 {
+        -x
+    } else {
+        x
+    }
+}
+let a: int = abs(-3)
+H 0
+MEASURE

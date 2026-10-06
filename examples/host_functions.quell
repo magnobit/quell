@@ -1,0 +1,13 @@
+fn square(x: float) -> float {
+    return x * x
+}
+
+fn add(a: int, b: int) -> int {
+    let s: int = a + b
+    return s
+}
+
+let n: int = add(2, 3)
+H 0
+CNOT 0 1
+MEASURE

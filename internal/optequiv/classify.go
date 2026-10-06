@@ -26,7 +26,7 @@ func classify(p *ir.Program) class {
 		c.reason = fmt.Sprintf("circuit has unbound parameters %v — bind concrete values before claiming equivalence (not a symbolic proof)", ir.UnboundParams(p))
 		return c
 	}
-	if p.NoiseDepolarizing > 0 || p.NoiseAmplitudeDamping > 0 || p.NoisePhaseDamping > 0 || p.NoiseReadout > 0 {
+	if p.NoiseDepolarizing > 0 || p.NoiseAmplitudeDamping > 0 || p.NoisePhaseDamping > 0 || p.NoiseBitFlip > 0 || p.NoiseReadout > 0 {
 		c.noisy = true
 	}
 	seenMeasure := false

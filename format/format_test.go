@@ -5,6 +5,7 @@ package format
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -125,5 +126,49 @@ func TestFormatExamples(t *testing.T) {
 				t.Errorf("Format is not idempotent on %s:\n once:  %q\n twice: %q", e.Name(), once, twice)
 			}
 		})
+	}
+}
+
+func TestFormatLet(t *testing.T) {
+	in := "let  shots:int=1+2*3\nH 0\nMEASURE\n"
+	want := "let shots: int = 1 + 2 * 3\nH 0\nMEASURE\n"
+	got := Format(in)
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if Format(got) != got {
+		t.Fatalf("not idempotent: %q", Format(got))
+	}
+}
+
+func TestFormatFunction(t *testing.T) {
+	in := "fn  add(a:int,b:int)->int{\nreturn a+b\n}\nlet n:int=add(2,3)\nH 0\nMEASURE\n"
+	want := "fn add(a: int, b: int) -> int {\n    return a + b\n}\nlet n: int = add(2, 3)\nH 0\nMEASURE\n"
+	got := Format(in)
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if Format(got) != got {
+		t.Fatalf("not idempotent: %q", Format(got))
+	}
+}
+
+func TestFormatHostIf(t *testing.T) {
+	in := "let x: int = if true { 1 } else { 0 }\nH 0\nMEASURE\n"
+	want := "let x: int = if true {\n    1\n} else {\n    0\n}\nH 0\nMEASURE\n"
+	got := Format(in)
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if Format(got) != got {
+		t.Fatalf("not idempotent: %q", Format(got))
+	}
+	fn := "fn abs(x: int) -> int { return if x < 0 { -x } else { x } }\nH 0\nMEASURE\n"
+	once := Format(fn)
+	if Format(once) != once {
+		t.Fatalf("function if not idempotent:\n%s", once)
+	}
+	if !strings.Contains(once, "return if x < 0 {") || !strings.Contains(once, "} else {") {
+		t.Fatalf("canonical function:\n%s", once)
 	}
 }

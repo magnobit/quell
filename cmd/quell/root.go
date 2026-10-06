@@ -20,7 +20,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:          "quell",
 		Short:        "Quell — backend-agnostic quantum circuit language",
-		Long:         "Quell is an open-source, backend-agnostic quantum circuit language.\nWrite once, run on IBM Quantum, AWS Braket, Google Quantum Engine, IonQ, Rigetti, or Azure Quantum.",
+		Long:         "Quell is a readable, provider-independent quantum programming language and compiler toolchain.\nThe compiler and runtime in this module are proprietary. The public quell-cli is a separately licensed CLI.\nCircuits lower to a canonical IR, then compile to supported targets (Qiskit, OpenQASM 2/3, Cirq, Braket, Q#) or simulate locally.",
 		Version:      version,
 		SilenceUsage: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -36,6 +36,12 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAnnealCmd())
 	root.AddCommand(newSimulateCmd())
 	root.AddCommand(newCompileCmd())
+	root.AddCommand(newInspectCmd())
+	root.AddCommand(newDrawCmd())
+	root.AddCommand(newStateCmd())
+	root.AddCommand(newObserveCmd())
+	root.AddCommand(newGradientCmd())
+	root.AddCommand(newVQECmd())
 	root.AddCommand(newFmtCmd())
 	root.AddCommand(newLSPCmd())
 	root.AddCommand(newPkgCmd())
@@ -44,6 +50,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newConvertCmd())
 	root.AddCommand(newEstimateCmd())
 	root.AddCommand(newBackendsCmd())
+	root.AddCommand(newCloudCmd())
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print the quell version",

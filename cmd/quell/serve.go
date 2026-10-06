@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strings"
 
-	"github.com/magnobit/quell/internal/compiler"
+	"github.com/magnobit/quell/compile"
+	"github.com/magnobit/quell/internal/check"
+	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
 	"github.com/spf13/cobra"
 )
@@ -77,9 +80,10 @@ func serve(port string) error {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 
 		var req struct {
-			Code     string `json:"code"`
-			Target   string `json:"target"`
-			Optimize *bool  `json:"optimize"` // defaults to true when omitted
+			Code     string   `json:"code"`
+			Target   string   `json:"target"`
+			Targets  []string `json:"targets"`
+			Optimize *bool    `json:"optimize"` // defaults to true when omitted
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			status := http.StatusBadRequest
@@ -98,9 +102,18 @@ func serve(port string) error {
 			return
 		}
 
-		target := compiler.Target(req.Target)
-		if target == "" {
-			target = compiler.TargetOpenQASM
+		spec := strings.TrimSpace(req.Target)
+		if len(req.Targets) > 0 {
+			spec = strings.Join(req.Targets, ",")
+		}
+		if spec == "" {
+			spec = "openqasm"
+		}
+		targets, terr := compile.ResolveTargets(spec)
+		if terr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": terr.Error(), "errorType": "validation"})
+			return
 		}
 
 		circ, err := parser.Parse(req.Code)
@@ -112,13 +125,21 @@ func serve(port string) error {
 			})
 			return
 		}
+		if err := check.Fail(circ); err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":     err.Error(),
+				"errorType": "check",
+			})
+			return
+		}
 
 		optimize := true
 		if req.Optimize != nil {
 			optimize = *req.Optimize
 		}
 
-		result, notes, err := compiler.Compile(circ, target, optimize)
+		emitted, err := compile.Emit(ir.Lower(circ), targets, optimize)
 		if err != nil {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -128,15 +149,38 @@ func serve(port string) error {
 			return
 		}
 
-		lang := "python"
-		if target == compiler.TargetOpenQASM {
-			lang = "openqasm"
+		if len(targets) == 1 {
+			target := targets[0]
+			one := emitted[target]
+			lang := "python"
+			if target == compile.OpenQASM || target == compile.OpenQASM2 {
+				lang = "openqasm"
+			}
+			if target == compile.QSharp {
+				lang = "qsharp"
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"result":         one.Code,
+				"target":         string(target),
+				"language":       lang,
+				"optimizerNotes": one.OptimizerNotes,
+				"fingerprint":    compile.Fingerprint(req.Code, string(target), optimize),
+			})
+			return
 		}
 
+		results := map[string]string{}
+		prints := map[string]string{}
+		var notes []string
+		for _, target := range targets {
+			one := emitted[target]
+			results[string(target)] = one.Code
+			prints[string(target)] = compile.Fingerprint(req.Code, string(target), optimize)
+			notes = one.OptimizerNotes
+		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"result":         result,
-			"target":         string(target),
-			"language":       lang,
+			"results":        results,
+			"fingerprints":   prints,
 			"optimizerNotes": notes,
 		})
 	})

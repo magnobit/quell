@@ -4,7 +4,11 @@
 // `gofmt`-equivalent).
 package format
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/magnobit/quell/internal/parser"
+)
 
 // Format returns src reformatted into Quell's canonical style:
 //   - gate keywords uppercased (H, CNOT, MEASURE, ...); the "qubit"
@@ -43,7 +47,54 @@ func Format(src string) string {
 	}
 
 	lines := make([]line, 0, len(rawLines))
-	for _, raw := range rawLines {
+	for i := 0; i < len(rawLines); {
+		if block, n, ok := parser.TakeFunctionLines(rawLines, i); ok {
+			codeLines := make([]string, len(block))
+			trails := make([]string, len(block))
+			for j, raw := range block {
+				code, trail := splitCodeComment(raw)
+				codeLines[j] = code
+				trails[j] = trail
+			}
+			canon, parsed := parser.CanonicalFunction(strings.Join(codeLines, "\n") + "\n")
+			var formatted []string
+			if parsed {
+				formatted = strings.Split(canon, "\n")
+			} else {
+				formatted = codeLines
+			}
+			if len(formatted) == len(trails) {
+				for j, fl := range formatted {
+					if strings.TrimSpace(fl) == "" && trails[j] == "" {
+						lines = append(lines, line{blank: true})
+						continue
+					}
+					lines = append(lines, line{code: fl, trail: trails[j]})
+				}
+			} else {
+				for _, fl := range formatted {
+					if strings.TrimSpace(fl) == "" {
+						continue
+					}
+					lines = append(lines, line{code: fl})
+				}
+			}
+			i += n
+			continue
+		}
+		if canon, n, ok := parser.TakeHostIfLet(rawLines, i); ok {
+			for _, fl := range strings.Split(canon, "\n") {
+				if strings.TrimSpace(fl) == "" {
+					continue
+				}
+				lines = append(lines, line{code: fl})
+			}
+			i += n
+			continue
+		}
+
+		raw := rawLines[i]
+		i++
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			lines = append(lines, line{blank: true})
@@ -118,6 +169,22 @@ func Format(src string) string {
 	return strings.Join(out, "\n") + "\n"
 }
 
+func splitCodeComment(raw string) (code, trail string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(trimmed, "//") {
+		return "", trimmed
+	}
+	code = trimmed
+	if ci := strings.Index(trimmed, "//"); ci >= 0 {
+		code = strings.TrimSpace(trimmed[:ci])
+		trail = strings.TrimSpace(trimmed[ci:])
+	}
+	return code, trail
+}
+
 // formatStatement normalizes one statement's keyword and inter-token
 // whitespace. Argument token content is never modified.
 func formatStatement(code string) string {
@@ -126,6 +193,10 @@ func formatStatement(code string) string {
 		return code
 	}
 	keyword := tokens[0]
+
+	if formatted, ok := parser.FormatHostLine(code); ok {
+		return formatted
+	}
 
 	if strings.EqualFold(keyword, "qubit") {
 		rest := strings.Join(tokens[1:], " ")

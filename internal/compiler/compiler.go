@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/optimizer"
 	"github.com/magnobit/quell/internal/parser"
@@ -16,12 +17,12 @@ import (
 type Target string
 
 const (
-	TargetOpenQASM   Target = "openqasm"
-	TargetOpenQASM2  Target = "openqasm2"
-	TargetQiskit     Target = "qiskit"
-	TargetCirq       Target = "cirq"
-	TargetBraket     Target = "braket"
-	TargetQSharp     Target = "qsharp"
+	TargetOpenQASM  Target = "openqasm"
+	TargetOpenQASM2 Target = "openqasm2"
+	TargetQiskit    Target = "qiskit"
+	TargetCirq      Target = "cirq"
+	TargetBraket    Target = "braket"
+	TargetQSharp    Target = "qsharp"
 )
 
 // CompileProgram generates target code from an already-lowered IR program.
@@ -81,12 +82,18 @@ func CompileProgramOpts(prog *ir.Program, target Target, optimize bool, opts opt
 // It returns the compiled code, any optimizer notes describing changes made
 // (nil when optimize is false or nothing changed), and an error.
 func Compile(c *parser.Circuit, target Target, optimize bool) (string, []string, error) {
+	if err := check.Fail(c); err != nil {
+		return "", nil, err
+	}
 	prog := ir.Lower(c)
 	return CompileProgram(prog, target, optimize)
 }
 
 // CompileOpts is Compile plus optional coupling-aware routing.
 func CompileOpts(c *parser.Circuit, target Target, optimize bool, opts optimizer.Options) (string, []string, error) {
+	if err := check.Fail(c); err != nil {
+		return "", nil, err
+	}
 	prog := ir.Lower(c)
 	return CompileProgramOpts(prog, target, optimize, opts)
 }
@@ -133,73 +140,119 @@ func opToOpenQASM(op ir.Op) (string, error) {
 	q := func(i int) string { return fmt.Sprintf("q[%d]", i) }
 	switch op.Kind {
 	case ir.OpH:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("h %s;", q(op.Qubits[0])), nil
 	case ir.OpX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("x %s;", q(op.Qubits[0])), nil
 	case ir.OpY:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("y %s;", q(op.Qubits[0])), nil
 	case ir.OpZ:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("z %s;", q(op.Qubits[0])), nil
 	case ir.OpS:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("s %s;", q(op.Qubits[0])), nil
 	case ir.OpT:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("t %s;", q(op.Qubits[0])), nil
 	case ir.OpSDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("sdg %s;", q(op.Qubits[0])), nil
 	case ir.OpTDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("tdg %s;", q(op.Qubits[0])), nil
 	case ir.OpSX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("sx %s;", q(op.Qubits[0])), nil
 	case ir.OpRX:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("rx(%g) %s;", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpRY:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ry(%g) %s;", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpRZ:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("rz(%g) %s;", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpP:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("p(%g) %s;", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpU:
-		if err := checkOp(op, 1, 3); err != nil { return "", err }
+		if err := checkOp(op, 1, 3); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("U(%g, %g, %g) %s;", op.Args[0], op.Args[1], op.Args[2], q(op.Qubits[0])), nil
 	case ir.OpCNOT:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("cx %s, %s;", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCZ:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("cz %s, %s;", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpSWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("swap %s, %s;", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpISWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("iswap %s, %s;", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCRX:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("crx(%g) %s, %s;", op.Args[0], q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCRY:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("cry(%g) %s, %s;", op.Args[0], q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCRZ:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("crz(%g) %s, %s;", op.Args[0], q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCCX:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ccx %s, %s, %s;", q(op.Qubits[0]), q(op.Qubits[1]), q(op.Qubits[2])), nil
 	case ir.OpCSWAP:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("cswap %s, %s, %s;", q(op.Qubits[0]), q(op.Qubits[1]), q(op.Qubits[2])), nil
 	case ir.OpMEASURE:
 		if len(op.Qubits) == 0 {
@@ -224,7 +277,9 @@ func opToOpenQASM(op ir.Op) (string, error) {
 		}
 		return fmt.Sprintf("barrier %s;", strings.Join(qs, ", ")), nil
 	case ir.OpRESET:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("reset %s;", q(op.Qubits[0])), nil
 	case ir.OpIF:
 		if len(op.Then) == 0 && op.Body == nil {
@@ -559,73 +614,119 @@ func opToQiskit(op ir.Op) (string, error) {
 	q := op.Qubits
 	switch op.Kind {
 	case ir.OpH:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.h(%d)", q[0]), nil
 	case ir.OpX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.x(%d)", q[0]), nil
 	case ir.OpY:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.y(%d)", q[0]), nil
 	case ir.OpZ:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.z(%d)", q[0]), nil
 	case ir.OpS:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.s(%d)", q[0]), nil
 	case ir.OpT:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.t(%d)", q[0]), nil
 	case ir.OpSDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.sdg(%d)", q[0]), nil
 	case ir.OpTDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.tdg(%d)", q[0]), nil
 	case ir.OpSX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.sx(%d)", q[0]), nil
 	case ir.OpRX:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.rx(%g, %d)", op.Args[0], q[0]), nil
 	case ir.OpRY:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.ry(%g, %d)", op.Args[0], q[0]), nil
 	case ir.OpRZ:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.rz(%g, %d)", op.Args[0], q[0]), nil
 	case ir.OpP:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.p(%g, %d)", op.Args[0], q[0]), nil
 	case ir.OpU:
-		if err := checkOp(op, 1, 3); err != nil { return "", err }
+		if err := checkOp(op, 1, 3); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.u(%g, %g, %g, %d)", op.Args[0], op.Args[1], op.Args[2], q[0]), nil
 	case ir.OpCNOT:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.cx(%d, %d)", q[0], q[1]), nil
 	case ir.OpCZ:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.cz(%d, %d)", q[0], q[1]), nil
 	case ir.OpSWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.swap(%d, %d)", q[0], q[1]), nil
 	case ir.OpISWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.append(iSwapGate(), [%d, %d])", q[0], q[1]), nil
 	case ir.OpCRX:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.crx(%g, %d, %d)", op.Args[0], q[0], q[1]), nil
 	case ir.OpCRY:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.cry(%g, %d, %d)", op.Args[0], q[0], q[1]), nil
 	case ir.OpCRZ:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.crz(%g, %d, %d)", op.Args[0], q[0], q[1]), nil
 	case ir.OpCCX:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.ccx(%d, %d, %d)", q[0], q[1], q[2]), nil
 	case ir.OpCSWAP:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.cswap(%d, %d, %d)", q[0], q[1], q[2]), nil
 	case ir.OpMEASURE:
 		if len(q) == 0 {
@@ -658,7 +759,9 @@ func opToQiskit(op ir.Op) (string, error) {
 		}
 		return fmt.Sprintf("qc.barrier(%s)", strings.Join(indices, ", ")), nil
 	case ir.OpRESET:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("qc.reset(%d)", q[0]), nil
 	case ir.OpIF:
 		if len(op.Then) == 0 && op.Body == nil {
@@ -761,46 +864,74 @@ func opToCirq(op ir.Op) (string, error) {
 	q := func(i int) string { return fmt.Sprintf("q[%d]", i) }
 	switch op.Kind {
 	case ir.OpH:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.H(%s))", q(op.Qubits[0])), nil
 	case ir.OpX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.X(%s))", q(op.Qubits[0])), nil
 	case ir.OpY:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.Y(%s))", q(op.Qubits[0])), nil
 	case ir.OpZ:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.Z(%s))", q(op.Qubits[0])), nil
 	case ir.OpS:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.S(%s))", q(op.Qubits[0])), nil
 	case ir.OpT:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.T(%s))", q(op.Qubits[0])), nil
 	case ir.OpSDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.S(%s)**-1)", q(op.Qubits[0])), nil
 	case ir.OpTDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.T(%s)**-1)", q(op.Qubits[0])), nil
 	case ir.OpSX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.X(%s)**0.5)", q(op.Qubits[0])), nil
 	case ir.OpRX:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.rx(rads=%g)(%s))", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpRY:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.ry(rads=%g)(%s))", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpRZ:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.rz(rads=%g)(%s))", op.Args[0], q(op.Qubits[0])), nil
 	case ir.OpP:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.ZPowGate(exponent=%g/%g)(%s))", op.Args[0], math.Pi, q(op.Qubits[0])), nil
 	case ir.OpU:
-		if err := checkOp(op, 1, 3); err != nil { return "", err }
+		if err := checkOp(op, 1, 3); err != nil {
+			return "", err
+		}
 		// U(θ,φ,λ) = Rz(φ)·Ry(θ)·Rz(λ) decomposition
 		return fmt.Sprintf(
 			"ops.extend([cirq.rz(rads=%g)(%s), cirq.ry(rads=%g)(%s), cirq.rz(rads=%g)(%s)])",
@@ -809,31 +940,49 @@ func opToCirq(op ir.Op) (string, error) {
 			op.Args[1], q(op.Qubits[0]),
 		), nil
 	case ir.OpCNOT:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.CNOT(%s, %s))", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCZ:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.CZ(%s, %s))", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpSWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.SWAP(%s, %s))", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpISWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.ISWAP(%s, %s))", q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCRX:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.rx(rads=%g).controlled()(%s, %s))", op.Args[0], q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCRY:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.ry(rads=%g).controlled()(%s, %s))", op.Args[0], q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCRZ:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.rz(rads=%g).controlled()(%s, %s))", op.Args[0], q(op.Qubits[0]), q(op.Qubits[1])), nil
 	case ir.OpCCX:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.CCX(%s, %s, %s))", q(op.Qubits[0]), q(op.Qubits[1]), q(op.Qubits[2])), nil
 	case ir.OpCSWAP:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.CSWAP(%s, %s, %s))", q(op.Qubits[0]), q(op.Qubits[1]), q(op.Qubits[2])), nil
 	case ir.OpMEASURE:
 		if len(op.Qubits) == 0 {
@@ -852,7 +1001,9 @@ func opToCirq(op ir.Op) (string, error) {
 		// Cirq has no barrier instruction — moments provide equivalent grouping
 		return "# barrier (use cirq.Circuit([cirq.Moment(ops)]) for explicit moment separation)", nil
 	case ir.OpRESET:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ops.append(cirq.reset(%s))", q(op.Qubits[0])), nil
 	case ir.OpIF:
 		if op.Body == nil && len(op.Then) == 0 {
@@ -916,77 +1067,123 @@ func opToBraket(op ir.Op) (string, error) {
 	q := op.Qubits
 	switch op.Kind {
 	case ir.OpH:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.h(%d)", q[0]), nil
 	case ir.OpX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.x(%d)", q[0]), nil
 	case ir.OpY:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.y(%d)", q[0]), nil
 	case ir.OpZ:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.z(%d)", q[0]), nil
 	case ir.OpS:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.s(%d)", q[0]), nil
 	case ir.OpT:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.t(%d)", q[0]), nil
 	case ir.OpSDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.si(%d)", q[0]), nil
 	case ir.OpTDG:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.ti(%d)", q[0]), nil
 	case ir.OpSX:
-		if err := checkOp(op, 1, 0); err != nil { return "", err }
+		if err := checkOp(op, 1, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.v(%d)", q[0]), nil
 	case ir.OpRX:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.rx(%d, %g)", q[0], op.Args[0]), nil
 	case ir.OpRY:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.ry(%d, %g)", q[0], op.Args[0]), nil
 	case ir.OpRZ:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.rz(%d, %g)", q[0], op.Args[0]), nil
 	case ir.OpP:
-		if err := checkOp(op, 1, 1); err != nil { return "", err }
+		if err := checkOp(op, 1, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.phaseshift(%d, %g)", q[0], op.Args[0]), nil
 	case ir.OpU:
-		if err := checkOp(op, 1, 3); err != nil { return "", err }
+		if err := checkOp(op, 1, 3); err != nil {
+			return "", err
+		}
 		// U(θ,φ,λ) decomposed as Rz(φ)·Ry(θ)·Rz(λ)
 		return fmt.Sprintf(
 			"circuit.rz(%d, %g); circuit.ry(%d, %g); circuit.rz(%d, %g)",
 			q[0], op.Args[2], q[0], op.Args[0], q[0], op.Args[1],
 		), nil
 	case ir.OpCNOT:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.cnot(%d, %d)", q[0], q[1]), nil
 	case ir.OpCZ:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.cz(%d, %d)", q[0], q[1]), nil
 	case ir.OpSWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.swap(%d, %d)", q[0], q[1]), nil
 	case ir.OpISWAP:
-		if err := checkOp(op, 2, 0); err != nil { return "", err }
+		if err := checkOp(op, 2, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.iswap(%d, %d)", q[0], q[1]), nil
 	case ir.OpCRX:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.crx(%d, %d, %g)", q[0], q[1], op.Args[0]), nil
 	case ir.OpCRY:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.cry(%d, %d, %g)", q[0], q[1], op.Args[0]), nil
 	case ir.OpCRZ:
-		if err := checkOp(op, 2, 1); err != nil { return "", err }
+		if err := checkOp(op, 2, 1); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.crz(%d, %d, %g)", q[0], q[1], op.Args[0]), nil
 	case ir.OpCCX:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.ccnot(%d, %d, %d)", q[0], q[1], q[2]), nil
 	case ir.OpCSWAP:
-		if err := checkOp(op, 3, 0); err != nil { return "", err }
+		if err := checkOp(op, 3, 0); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("circuit.cswap(%d, %d, %d)", q[0], q[1], q[2]), nil
 	case ir.OpMEASURE:
 		if len(q) == 0 {

@@ -14,11 +14,11 @@ import (
 
 // OptimizeResult is Quell source after conservative IR passes, plus deltas.
 type OptimizeResult struct {
-	Original  string         `json:"original"`
-	Optimized string         `json:"optimized"`
-	Optimizer OptimizerDelta `json:"optimizer"`
-	Circuit   CircuitStats   `json:"circuit"`
-	OptimizedCircuit CircuitStats `json:"optimizedCircuit"`
+	Original         string         `json:"original"`
+	Optimized        string         `json:"optimized"`
+	Optimizer        OptimizerDelta `json:"optimizer"`
+	Circuit          CircuitStats   `json:"circuit"`
+	OptimizedCircuit CircuitStats   `json:"optimizedCircuit"`
 }
 
 // OptimizeSource parses Quell, runs the IR optimizer, and emits Quell again.

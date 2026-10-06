@@ -21,6 +21,35 @@ func TestBindSource_ProducesConcreteCircuit(t *testing.T) {
 	}
 }
 
+func TestBindMany_MatchesBindSource(t *testing.T) {
+	src := "PARAM theta : angle\nRX theta 0\nMEASURE"
+	sets := []map[string]float64{{"theta": 0.25}, {"theta": 1.5}}
+	many, err := BindMany(src, sets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, set := range sets {
+		one, err := BindSource(src, set)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if many[i] != one {
+			t.Fatalf("set %d: BindMany %q, BindSource %q", i, many[i], one)
+		}
+	}
+	tpl, err := Prepare(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := tpl.Bind(sets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != many[0] {
+		t.Fatal("template was mutated or bind diverged")
+	}
+}
+
 func TestBindSource_MissingParamErrors(t *testing.T) {
 	_, err := BindSource("PARAM theta : angle\nRX theta 0\nMEASURE", nil)
 	if err == nil {

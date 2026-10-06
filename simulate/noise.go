@@ -19,6 +19,9 @@ type NoiseModel struct {
 	AmplitudeDamping float64
 	// PhaseDamping: T2-like dephasing — with probability P apply Z on the qubit.
 	PhaseDamping float64
+	// BitFlip: with probability P apply X on the qubit (classical bit-flip
+	// channel). Source: `NOISE bit_flip 0.1` or `--noise bit_flip=0.1`.
+	BitFlip float64
 	// ReadoutError: after sampling a bitstring, flip each bit independently
 	// with this probability (classical SPAM / readout error).
 	ReadoutError float64
@@ -31,7 +34,7 @@ func (n NoiseModel) Active() bool {
 
 // GateNoise is true when a channel must run during gate application.
 func (n NoiseModel) GateNoise() bool {
-	return n.Depolarizing > 0 || n.AmplitudeDamping > 0 || n.PhaseDamping > 0
+	return n.Depolarizing > 0 || n.AmplitudeDamping > 0 || n.PhaseDamping > 0 || n.BitFlip > 0
 }
 
 // Validate returns an error if parameters are out of [0,1].
@@ -49,6 +52,9 @@ func (n NoiseModel) Validate() error {
 		return err
 	}
 	if err := check("phase_damping", n.PhaseDamping); err != nil {
+		return err
+	}
+	if err := check("bit_flip", n.BitFlip); err != nil {
 		return err
 	}
 	return check("readout", n.ReadoutError)
@@ -73,6 +79,9 @@ func (n NoiseModel) ApplyAfterGate(sv *StateVector, qubits []int, rng *rand.Rand
 		}
 		if n.PhaseDamping > 0 {
 			applyPhaseDamping(sv, q, n.PhaseDamping, rng)
+		}
+		if n.BitFlip > 0 && rng.Float64() < n.BitFlip {
+			sv.X(q)
 		}
 	}
 }
@@ -195,10 +204,12 @@ func ParseNoiseFlag(s string) (NoiseModel, error) {
 		n.AmplitudeDamping = f
 	case "phase_damping", "phase-damping", "dephasing", "t2":
 		n.PhaseDamping = f
+	case "bit_flip", "bit-flip", "bitflip":
+		n.BitFlip = f
 	case "readout", "readout_error", "spam":
 		n.ReadoutError = f
 	default:
-		return n, fmt.Errorf("noise: unknown model %q (depolarizing|amplitude_damping|phase_damping|readout)", name)
+		return n, fmt.Errorf("noise: unknown model %q (depolarizing|amplitude_damping|phase_damping|bit_flip|readout)", name)
 	}
 	return n, n.Validate()
 }
@@ -214,6 +225,9 @@ func MergeNoise(a, b NoiseModel) NoiseModel {
 	}
 	if b.PhaseDamping > 0 {
 		out.PhaseDamping = b.PhaseDamping
+	}
+	if b.BitFlip > 0 {
+		out.BitFlip = b.BitFlip
 	}
 	if b.ReadoutError > 0 {
 		out.ReadoutError = b.ReadoutError

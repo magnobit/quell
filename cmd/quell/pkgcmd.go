@@ -67,7 +67,8 @@ func newPkgAddCmd() *cobra.Command {
 }
 
 func newPkgGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var locked, writeLock bool
+	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "Fetch every package listed in quell.pkg.yml",
 		Args:  cobra.NoArgs,
@@ -81,6 +82,17 @@ func newPkgGetCmd() *cobra.Command {
 				fmt.Println("no packages required — nothing to do (see `quell pkg add`)")
 				return nil
 			}
+			if locked || writeLock {
+				warnings, err := pkgmgr.Sync(root, m, pkgmgr.Options{Strict: locked, WriteLock: writeLock})
+				for _, w := range warnings {
+					fmt.Fprintln(os.Stderr, "warning:", w)
+				}
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Fetched %d package(s)\n", len(m.Require))
+				return nil
+			}
 			if err := pkgmgr.Get(root, m); err != nil {
 				return err
 			}
@@ -88,6 +100,9 @@ func newPkgGetCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&locked, "locked", false, "fail if quell.pkg.lock.yml is missing or a checksum does not match")
+	cmd.Flags().BoolVar(&writeLock, "write-lock", false, "write quell.pkg.lock.yml after fetch")
+	return cmd
 }
 
 func newPkgListCmd() *cobra.Command {

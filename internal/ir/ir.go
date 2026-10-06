@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/magnobit/quell/internal/host"
 	"github.com/magnobit/quell/internal/parser"
 )
 
@@ -83,15 +84,36 @@ type CaseArm struct {
 	Body    []Op
 }
 
+// HostLocal is an immutable typed host value. It is not an Op and not a PARAM.
+// Canonical IR omits it so unused locals do not change target output or the
+// quantum canonical form.
+type HostLocal struct {
+	Name string
+	Type string
+	Line int
+}
+
+// HostFunc is a host function signature. It is not an Op.
+// Canonical IR omits it so an unused function does not change quantum output.
+type HostFunc struct {
+	Name   string
+	Params []string
+	Ret    string
+	Line   int
+}
+
 // Program is the backend-independent representation of a compiled circuit.
 type Program struct {
 	NumQubits int
 	Ops       []Op
 	Params    []string
+	Host      []HostLocal
+	Funcs     []HostFunc
 	// Stochastic noise for local simulation (ignored by hardware compile targets).
 	NoiseDepolarizing     float64
 	NoiseAmplitudeDamping float64
 	NoisePhaseDamping     float64
+	NoiseBitFlip          float64
 	NoiseReadout          float64
 }
 
@@ -108,13 +130,29 @@ func Lower(c *parser.Circuit) *Program {
 	}
 
 	params := append([]string(nil), c.Params...)
+	hp := host.Build(c)
+	var hostLocals []HostLocal
+	for _, g := range hp.Globals {
+		hostLocals = append(hostLocals, HostLocal{Name: g.Name, Type: g.Type, Line: g.Line})
+	}
+	var funcs []HostFunc
+	for _, f := range hp.Funcs {
+		hf := HostFunc{Name: f.Name, Ret: f.Ret, Line: f.Line}
+		for _, p := range f.Params {
+			hf.Params = append(hf.Params, p.Name+":"+p.Type)
+		}
+		funcs = append(funcs, hf)
+	}
 	return &Program{
 		NumQubits:             nq,
 		Ops:                   ops,
 		Params:                params,
+		Host:                  hostLocals,
+		Funcs:                 funcs,
 		NoiseDepolarizing:     c.NoiseDepolarizing,
 		NoiseAmplitudeDamping: c.NoiseAmplitudeDamping,
 		NoisePhaseDamping:     c.NoisePhaseDamping,
+		NoiseBitFlip:          c.NoiseBitFlip,
 		NoiseReadout:          c.NoiseReadout,
 	}
 }
@@ -191,9 +229,12 @@ func Bind(p *Program, values map[string]float64) (*Program, error) {
 	out := &Program{
 		NumQubits:             p.NumQubits,
 		Params:                nil,
+		Host:                  append([]HostLocal(nil), p.Host...),
+		Funcs:                 append([]HostFunc(nil), p.Funcs...),
 		NoiseDepolarizing:     p.NoiseDepolarizing,
 		NoiseAmplitudeDamping: p.NoiseAmplitudeDamping,
 		NoisePhaseDamping:     p.NoisePhaseDamping,
+		NoiseBitFlip:          p.NoiseBitFlip,
 		NoiseReadout:          p.NoiseReadout,
 	}
 	ops, err := bindOps(p.Ops, values)

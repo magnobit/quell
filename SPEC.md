@@ -1,17 +1,26 @@
 # Quell Language Specification
 
-Version: 0.3.0
+Version: 0.10.0
 
 ---
 
 ## Overview
 
-Quell is a domain-specific language for describing quantum circuits. It is:
+Quell is a domain-specific language for quantum circuits and a limited amount of dynamic control. It is:
 
-- **Declarative**: you describe gates and measurements, not control flow
-- **Backend-agnostic**: compiled to OpenQASM 3, Qiskit, Cirq, or Braket
-- **Human-readable**: one gate per line, no boilerplate
-- **Safe**: the compiler validates arity, angles, and qubit constraints before producing output
+- **Provider-independent**: source is not a provider SDK. Compile targets today are OpenQASM 3, OpenQASM 2, Qiskit, Cirq, Braket, and Q#.
+- **Human-readable**: one gate per line, plus block forms for control flow and macros.
+- **Checked**: the compiler validates arity, angles, and qubit constraints before producing output.
+
+Language version in this document is **0.10.0**. That number is not the CLI version and not the IR schema version. 0.9.0 adds host arrays, qubit registers, `quantum fn`, observables, and string interpolation in `print` / `println`. 0.10.0 lowers controlled kernels for a reversible subset and adds host task calls. `async`, `await`, `all`, `race`, `timeout`, `cancel`, and `task` are not reserved identifiers. A host function with one of those names keeps the 0.9 meaning. The scheduler builtin is used only when no such function is declared. Host `for` ranges stay inclusive.
+
+### Three control-flow layers
+
+| Layer | What this version does |
+|---|---|
+| Compile-time | `FOR i IN a..b` unrolls (inclusive, max 65). `gate` macros expand before IR. Angle forms such as `PI/2` fold to a float at parse time. |
+| Host / classical runtime | Immutable `let` and mutable `var` of `bool`, `int`, `float`, and `string`. Host `fn`. Lowercase `if`, `for`, and `while` run on the host. `break` and `continue` apply only to those host loops. Host arrays, qubit registers, and `quantum fn` kernels exist (0.9.0). No recursion. A function cannot read a `PARAM`. |
+| QPU dynamic control | `IF` / `ELSE`, `WHILE … MAX`, `SWITCH`, mid-circuit `MEASURE`, `RESET`, and `ASSERT` run against the classical bit register during local simulation. The optimizer treats these as barriers. |
 
 ---
 
@@ -201,7 +210,229 @@ MEASURE
 `PARAM theta` (untyped) is also accepted. Type annotations are `angle`, `float`, or `real`.
 Bind at run time: `quell run file.quell --param theta=1.5708`.
 
-### Conditionals
+`PARAM` is not a host local. A program that declares both `PARAM theta` and `let theta` is rejected.
+
+### Typed host values
+
+```quell
+let shots: int = 1000
+let theta: float = 1.5708
+let enabled: bool = true
+let label: string = "baseline"
+```
+
+A `let` is an immutable host value. The name, the type, and the initializer are all required. The initializer is a host expression, not a gate angle. `PI` and `PI/2` stay gate-angle spellings. They are not host identifiers.
+
+Types are `bool`, `int`, `float`, and `string`. There is no implicit conversion between `int` and `float`. Write `float(1)` or `int(1.9)` when a conversion is intended. `int` from a float truncates toward zero.
+
+Locals cannot be assigned again. `x = 6` is an error. There is no `var`.
+
+Scope for a file-level `let` is one list for the whole file, in source order. A name is visible only after its `let`. File-level locals are not allowed inside `IF`, `WHILE`, `SWITCH`, `PAR`, `FOR`, or a `gate` body. A `fn` body is a separate lexical scope. See Host functions.
+
+`let` does not become a `PARAM` and does not appear in canonical IR or in compile-target text. A gate angle still needs a numeric token, `PI` notation, or a `PARAM` name. Using a local's name as a gate angle is a name clash, not a substitution.
+
+#### Expressions
+
+| Operators | Types | Result |
+|---|---|---|
+| `+` `-` `*` `/` | `int` with `int`, or `float` with `float` | same numeric type |
+| `%` | `int` with `int` only | `int` |
+| `<` `<=` `>` `>=` | two `int`s or two `float`s | `bool` |
+| `==` `!=` | two values of the same type | `bool` |
+| boolean and, boolean or | `bool` with `bool` | `bool` |
+| `!` | `bool` | `bool` |
+| unary `-` | `int` or `float` | same type |
+
+Precedence, tightest first: grouping and conversions, unary `!` and `-`, `*` `/` `%`, `+` `-`, ordering comparisons, `==` `!=`, `&&`, `||`.
+
+Conversions are `bool(...)`, `int(...)`, `float(...)`, and `string(...)`. `bool` accepts `bool`, `int` (zero is false), and `float`. It does not accept `string`. `int` accepts an integer `string` such as `"12"` and rejects `"no"`. Division or remainder by zero is an error.
+
+Diagnostics use stable codes (`QL1001` syntax, `QL2001` unknown identifier, `QL2002` duplicate local, `QL2003` PARAM/local collision, `QL2004` type mismatch, `QL2005` invalid operator, `QL2006` invalid conversion, `QL2007` assignment to an immutable local, `QL2008` division by zero). Function codes are listed under Host functions. Each diagnostic carries a line, a column span, a suggested fix, and a docs URL. Tooling can read the same records as JSON.
+
+### Host functions
+
+```quell
+fn square(x: float) -> float {
+    return x * x
+}
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+let n: int = add(2, 3)
+```
+
+`fn` is a host function. `gate` remains a compile-time quantum macro. `quantum fn` is not in this version.
+
+A function has typed scalar parameters and one declared return type. The types are `bool`, `int`, `float`, and `string`. There are no overloads, default arguments, variadic parameters, generics, closures, or lambdas. Recursion, including mutual recursion, is rejected.
+
+The body may contain immutable `let` declarations, host expressions, calls to other host functions in the same file, lowercase `if` expressions, statement-form host `if`, and `return`. Every reachable path must return the declared type. It may not contain quantum gates, host loops, assignment, async, provider calls, or I/O.
+
+File scope holds `PARAM` names, top-level `let` names, function names, and gate macros. Duplicate names in that scope are errors. A function name must not match a gate macro or a built-in gate. A function sees file-level lets that appear above it, then its own parameters and lets. A parameter may hide a file-level let. A name is not visible before its declaration. A later function may call an earlier one, and an earlier function may call a later one, because signatures are collected before bodies are checked.
+
+`PARAM` is still an externally bindable circuit input. A host function cannot read or assign a `PARAM`. Using a `PARAM` name inside a function is an unknown-identifier error, not a silent conversion into a local.
+
+Calls are ordinary host expressions: `add(2, 3)`. Conversions such as `int(...)` stay conversions, not function calls. Argument count and argument types must match the signature. There is no implicit numeric conversion.
+
+`import` still splices source text. A function in an imported file is visible as if it had been pasted into the importer. The same file reached by two import paths is pasted twice, so a second copy of the function is a duplicate-function error. There is no separate export list.
+
+An unused function is not an IR operation and does not change canonical IR or compile-target text.
+
+| Code | Meaning |
+|---|---|
+| QL2101 | Unknown function |
+| QL2102 | Duplicate function |
+| QL2103 | Function and gate share a name |
+| QL2104 | Wrong argument count |
+| QL2105 | Argument type mismatch |
+| QL2201 | No return on any path |
+| QL2202 | Return type mismatch |
+| QL2203 | Recursion, including mutual recursion |
+| QL2204 | Duplicate parameter |
+
+### Host conditionals
+
+Lowercase `if` is **host control**. Uppercase `IF` is **QPU dynamic control** and is specified in [QPU conditionals](#qpu-conditionals). The spelling is case-sensitive: `If` and `iF` remain QPU `IF`. A lowercase `if` is never a gate and never an `ir.Op`. An unused host conditional does not change canonical quantum IR, optimizer barriers, or compile-target text.
+
+There are two host forms. They stay distinct.
+
+#### Conditional expression
+
+```quell
+let sign: int = if flag {
+    -1
+} else {
+    1
+}
+
+fn abs(x: int) -> int {
+    return if x < 0 {
+        -x
+    } else {
+        x
+    }
+}
+```
+
+A conditional expression yields one host scalar.
+
+- The condition has type `bool`.
+- Both branches are required.
+- Each branch yields one value. A branch is not a list of statements, and it does not use `return`.
+- The branch types match exactly. `int` and `float` do not combine.
+- The result type is that common type: `bool`, `int`, `float`, or `string`.
+- Evaluation is lazy. Only the selected branch runs. `let x: int = if true { 1 } else { 1 / 0 }` succeeds, because the division is not evaluated. Both branches are still typechecked. Division by zero and overflow are reported only for the branch a constant condition selects.
+- A branch may declare immutable `let` names. A name is visible only in that branch, and only after its declaration. The other branch may use the same name for a different local. A second declaration of the same name in one branch is an error.
+- A branch local may shadow a function parameter or an outer local that is not a circuit `PARAM`. Inside the branch, the inner binding is the one that is visible. Rename and go-to-definition stay inside that block.
+- A branch local may not reuse a circuit `PARAM` name.
+
+#### Conditional statement
+
+```quell
+fn abs(x: int) -> int {
+    if x < 0 {
+        return -x
+    } else {
+        return x
+    }
+}
+```
+
+A conditional statement controls host statements. It does not yield a value. It is allowed only inside `fn`. A file-level value still uses `let name: type = if condition { expr } else { expr }`.
+
+`else` is optional. `else if` is sugar for an else branch whose only statement is another host `if`. The formatter prints that nesting with braces.
+
+A branch may contain:
+
+- immutable `let`
+- a nested host `if`
+- `return`
+- a host call where a call is already valid, inside a `let` or a `return`
+
+A branch may not contain quantum gates, assignment, loops, async, provider calls, or I/O.
+
+Each branch is its own lexical block. Branch locals are visible only inside that block. Sibling branches may reuse a name. A branch local may shadow a function parameter. It may not reuse a circuit `PARAM` name. A function-body `let` still may not reuse a parameter name, because that block already contains the parameters. Rename and go-to-definition use the innermost block.
+
+A function with a declared return type must return on every reachable path.
+
+```quell
+fn sign(x: int) -> int {
+    if x < 0 {
+        return -1
+    } else {
+        return 1
+    }
+}
+```
+
+`if x < 0 { return -1 }` with no later return does not cover the other path. A function that never returns at all is still a missing return, not a partial path. A statement after a `return` is unreachable. That is a warning. The statements are still typechecked, and the function still compiles.
+
+Only the selected statement branch runs. The condition is evaluated once. A `return` stops the block and becomes the caller's result. Both branches are still typechecked. When the condition is a constant bool, division by zero and overflow are reported only for the selected branch. When the condition is not a constant, those checks wait until the call.
+
+There is no host `for`, `while`, `break`, or `continue`.
+
+| Code | Meaning |
+|---|---|
+| QL2301 | Host condition must be bool |
+| QL2302 | Conditional branches have different types |
+| QL2303 | Conditional expression requires else |
+| QL2304 | Invalid host block value |
+| QL2305 | Not all host paths return |
+| QL2306 | Unreachable host statement (warning) |
+
+<a id="host-loops"></a>
+
+### Host loops and mutation
+
+Lowercase `for` and `while` are host loops. They exist only inside `fn`. They are not compile-time `FOR` and not QPU `WHILE ... MAX`.
+
+```quell
+fn sum(n: int) -> int {
+    var total: int = 0
+    for i in 1..n {
+        total = total + i
+    }
+    return total
+}
+```
+
+`for i in start..end` is an inclusive `int` range. `while condition` repeats while the condition is `bool` and true. `break` and `continue` leave or restart the innermost host loop. They are errors outside a host loop, and they are not valid in `FOR` or `WHILE`.
+
+`let` stays immutable. `var` is mutable host state. Assignment is allowed only to a `var` in scope. A `var` may not reuse a circuit `PARAM` name. Qubits are not mutable host values.
+
+A loop that might not run does not by itself satisfy "every path returns". `while true { return 1 }` does, because the condition is constantly true and the body always returns. A host loop stops after 10000 iterations.
+
+The same return-flow results used for `if` apply here: always, sometimes, or falls through. `break` ends the loop without returning from the function.
+
+<a id="host-output"></a>
+
+### Host output
+
+`print` and `println` are host statements. `format` returns a `string` and writes nothing.
+
+```quell
+println("shots", 3)
+let msg: string = format("Energy = {:.1f}", 1.5)
+```
+
+Arguments to `print` and `println` are separated by one space. `println` adds one trailing newline. Format placeholders are `{}`, `{:d}`, `{:s}`, `{:b}`, and `{:.Nf}` with N from 0 to 12. `{{` is a literal brace. Output goes through one writer: the CLI uses standard output, and tests can capture a buffer. A single write is capped and strings that look like bearer tokens are redacted. `print` inside `gate` or QPU `IF` is rejected.
+
+| Code | Meaning |
+|---|---|
+| QL2401 | Invalid format specifier |
+| QL2402 | Format argument count |
+| QL2403 | Format type mismatch |
+| QL2405 | print does not yield a value |
+| QL2501 | Host loop iteration limit |
+| QL2502 | break or continue outside a host loop |
+| QL2503 | Invalid host loop condition or range |
+
+<a id="conditionals"></a>
+
+### QPU conditionals
+
+This is uppercase `IF`. It reads the classical bit register during local simulation. It is not lowercase host `if`. Do not send these programs through the host checker.
 
 Conditions may be `c[i]==v`, `c[i]==c[j]`, or `c==v` (little-endian integer over the classical register).
 
@@ -349,6 +580,7 @@ Or CLI: `quell simulate file.quell --noise depolarizing=0.01 --noise amplitude_d
 | `depolarizing` | With probability *p*, apply X, Y, or Z (each *p*/3) |
 | `amplitude_damping` | T1-like jump / damp toward \|0⟩ with rate *γ* (`t1` alias) |
 | `phase_damping` | T2-like dephasing — apply Z with probability *p* (`t2` alias) |
+| `bit_flip` | Apply X with probability *p* after each gated qubit (`NOISE bit_flip 0.1` or `--noise bit_flip=0.1`) |
 | `readout` | Classical SPAM: flip each measured bit with probability *p* |
 
 Hardware compile targets ignore `NOISE`; it only affects local simulation.
@@ -482,6 +714,17 @@ quell compile <file>              Compile to target language
   --output out.py
 quell fmt <file>                  Format a Quell source file
   --write | --check                Reformat in place | exit 1 if not already formatted
+quell simulate <file>             Local statevector run, no credentials
+  --shots N | --noise model=p      Models: depolarizing, amplitude_damping, phase_damping, bit_flip, readout
+quell draw <file>                 ASCII circuit diagram, one row per qubit
+quell state <file>                Exact final statevector of the gates before the first MEASURE
+  --param name=v | --top N | --json
+quell observe <file>              Exact expectation of an `observable` on the local statevector
+  --observable name | --param name=v | --json
+quell gradient <file>             Central-difference gradient of an expectation over PARAMs
+  --observable name | --param name=v | --wrt name | --json
+quell vqe <file>                  Nelder-Mead minimisation of an expectation over PARAMs
+  --observable name | --param name=start | --max-iter N | --json
 quell lsp                         Start the language server (LSP over stdio)
 quell pkg add <source> [version]  Add a package to quell.pkg.yml and fetch it
 quell pkg get                     Fetch every package in quell.pkg.yml
@@ -714,6 +957,38 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 
 ---
 
+## Current limitations
+
+- A host `fn` has a return on every reachable path and no recursion. Lowercase `if` is either an expression (required `else`, one value per branch, exact types) or a statement inside `fn`. Only the selected branch is evaluated. A host `fn` body has no loops, assignment, async, provider calls, or I/O. Host `for` and `while` run at top level and never on the QPU. A host function cannot read a `PARAM`. A branch local may shadow an outer local, and may not reuse a `PARAM` name.
+- There is no `async` keyword and no thread, mutex, or lock syntax. Host task calls (`async`, `await`, `all`, `race`, `timeout`, `cancel`) submit through the existing QubitLabs scheduler and are not a second scheduler.
+- Observable expectation is exact on the local statevector only. Provider-native expectation is not claimed, and the statevector stops at the first `MEASURE`.
+- `quell gradient` is a central difference, not the parameter-shift rule. `quell vqe` is Nelder-Mead and can stop at a local minimum.
+- `WHILE` requires `MAX` between 1 and 256 and cannot nest.
+- `FOR` is parse-time unrolling, not a QPU loop.
+- Optimizer equivalence is exact for unitary circuits and unsupported or weaker once dynamic control or noise is present.
+- Statevector simulation is capped at 24 qubits. Noise uses the pure-Go simulator.
+- NVIDIA CUDA-Q support is a narrow Python path (H, X, CX, measure) with local fallback. Fallback is not GPU execution.
+- QIR export is a base-profile subset (`quell inspect --kind qir`). It is structurally checked with `llvm-as` and pyqir when those tools are installed. It has not been executed on qir-runner.
+- Compile output is source text for another toolchain. It is not a certificate that a provider will accept or run that text.
+
+---
+
+<a id="host-arrays"></a>
+
+## Host arrays and qubit registers (0.9.0)
+
+`let xs: int[] = [1, 2, 3]` is immutable. `var xs: int[]` allows `xs[i] = value`. `len(xs)` returns an int. A constant index outside `0 .. len-1` is QL2601 at check time. Any other index is checked at runtime. QL2602 is the size limit. QL2603 is an element-type error. Host `for` ranges stay inclusive, so the last valid index is `len(xs)-1`.
+
+`qubit q[4]` allocates four qubits, `q[0]` through `q[3]`. The register lives until the circuit ends. There is no manual free. `RESET` is the existing reset gate.
+
+## Quantum functions (0.9.0)
+
+`quantum fn bell(a: qubit, b: qubit) { H a; CNOT a, b }` is a kernel. `gate` remains a compile-time macro. `fn` remains a host function. A call is inlined into the existing instruction list before canonical IR, so IR gains no call opcode. Recursion is rejected. `print` and other host statements are rejected in the body. `adjoint` and `inverse` rewrite a safe gate subset. `controlled` lowers only gates that already exist in the IR: one control on X, Z, RX, RY, RZ, or SWAP becomes CNOT, CZ, CRX, CRY, CRZ, or CSWAP; two controls on X, or one extra control on CNOT, become CCX. Measurement, reset, dynamic control, and gates without that direct form (including H, Y, S, and T) are rejected. Nested `controlled controlled` counts as two controls.
+
+## Observables (0.9.0)
+
+`observable h = -1.05 * Z(0) + 0.18 * X(0) * X(1)` is a value beside the circuit, not an opcode. `expectation(h)` on the local simulator is the exact statevector expectation of the unitary prefix. RESET and classical control are rejected on that path. Provider-native expectation is not claimed.
+
 ## Roadmap
 
 - [x] Named qubits: `qubit alice, bob` — v0.0.1
@@ -737,6 +1012,16 @@ Use the QubitLabs simulator for algorithm development. Switch to real hardware o
 - [x] Subroutines and gate definitions (`gate bell q0 q1 { H q0; CNOT q0 q1 }`) — parse-time macros
 - [x] Decomposition-backed converters (RXX/RYY/RZZ, PhasedXPowGate, …) via `quell/decompose`
 - [x] Parameterized circuits (`PARAM theta` / `RX theta 0` + `--param theta=1.57`) — bind before sim/compile
+- [x] Immutable host locals (`let name: bool|int|float|string = expr`) — v0.4.0. Not a PARAM, not a function.
+- [x] Host functions (`fn name(params) -> type { return expr }`) — v0.5.0. Not a gate macro and not `quantum fn`.
+- [x] Host conditionals (`if condition { expr } else { expr }`) — v0.6.0. Lowercase `if` only. Not QPU `IF`.
+- [x] Statement-form host `if` inside `fn`, with return-path checking — v0.7.0. Not a host loop and not QPU `IF`.
+- [x] Host `for` / `while`, `break` / `continue`, and `var` — v0.8.0. Not compile-time `FOR` and not QPU `WHILE`.
+- [x] Host arrays (`int[]` and the other scalar arrays), `len`, and `qubit name[n]` — v0.9.0. Host `for` stays inclusive.
+- [x] `quantum fn` kernels, inlined into the existing instruction list — v0.9.0. `gate` stays a macro. `controlled` lowers the reversible subset in v0.10.0 and rejects measurement and reset.
+- [x] Pauli observables and exact local `expectation` — v0.9.0. Not an IR opcode.
+- [x] `quell draw`, `state`, `observe`, `gradient`, `vqe` and a `bit_flip` noise channel — CLI and library only (`quell/analysis`). No syntax, no IR change. Local statevector, exact, ≤ 24 qubits.
+- [x] String interpolation in `println`, using the same formatter as `format` — v0.9.0.
 - [x] Native noise models (depolarising, amplitude damping) — stochastic local sim + `NOISE` / `--noise`
 - [x] Quantum Digital Twin / multi-provider estimate (`quell estimate` + Cloud Benchmark; educational cost models)
 - [x] One-click migration + AI optimize (`POST /ai/convert` QASM/Q#; `POST /ai/optimize`; Labs `/migrate` + Assist loop)

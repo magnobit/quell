@@ -28,6 +28,9 @@ import (
 
 	"github.com/magnobit/quell/compile"
 	"github.com/magnobit/quell/format"
+	"github.com/magnobit/quell/internal/check"
+	"github.com/magnobit/quell/internal/parser"
+	"github.com/magnobit/quell/qerr"
 )
 
 // Run starts the LSP server, reading requests from r and writing
@@ -85,6 +88,8 @@ func (s *server) loop(r io.Reader) error {
 					"definitionProvider":         true,
 					"renameProvider":             true,
 					"completionProvider":         map[string]any{"triggerCharacters": []string{}},
+					"signatureHelpProvider":      map[string]any{"triggerCharacters": []string{"(", ","}},
+					"foldingRangeProvider":       true,
 				},
 				"serverInfo": map[string]any{"name": "quell-lsp", "version": "0.2.0"},
 			})
@@ -147,6 +152,14 @@ func (s *server) loop(r io.Reader) error {
 			var p renameParams
 			json.Unmarshal(msg.Params, &p)
 			s.rename(msg.ID, p.TextDocument.URI, p.Position, p.NewName)
+		case "textDocument/signatureHelp":
+			var p textDocumentPositionParams
+			json.Unmarshal(msg.Params, &p)
+			s.signatureHelp(msg.ID, p.TextDocument.URI, p.Position)
+		case "textDocument/foldingRange":
+			var p textDocumentPositionParams
+			json.Unmarshal(msg.Params, &p)
+			s.folding(msg.ID, p.TextDocument.URI)
 		default:
 			// Unknown request with an ID must still get a response, per spec.
 			if len(msg.ID) > 0 {
@@ -161,14 +174,28 @@ func (s *server) loop(r io.Reader) error {
 func (s *server) publishDiagnostics(uri, text string) {
 	var diags []diagnostic
 
-	result, err := compile.CompileWithWarnings(text, compile.OpenQASM, true)
+	circ, err := parser.Parse(text)
 	if err != nil {
-		diags = append(diags, diagnosticFromMessage(err.Error(), 1))
+		if d, ok := qerr.AsDiagnostic(err); ok {
+			diags = append(diags, diagnosticFromStructured(d))
+		} else {
+			diags = append(diags, diagnosticFromMessage(err.Error(), 1))
+		}
+	} else if host := check.Check(circ); len(host) > 0 {
+		for _, d := range host {
+			diags = append(diags, diagnosticFromStructured(d))
+		}
 	} else {
-		for _, w := range result.Warnings {
-			diags = append(diags, diagnosticFromMessage(w, 2))
+		result, cerr := compile.CompileWithWarnings(text, compile.OpenQASM, true)
+		if cerr != nil {
+			diags = append(diags, diagnosticFromMessage(cerr.Error(), 1))
+		} else {
+			for _, w := range result.Warnings {
+				diags = append(diags, diagnosticFromMessage(w, 2))
+			}
 		}
 	}
+	diags = append(diags, packageDiagnostics(uri, text)...)
 	if diags == nil {
 		diags = []diagnostic{}
 	}
@@ -202,6 +229,36 @@ func diagnosticFromMessage(msg string, severity int) diagnostic {
 	}
 }
 
+func diagnosticFromStructured(d qerr.Diagnostic) diagnostic {
+	sev := 1
+	if d.Severity == qerr.SeverityWarning {
+		sev = 2
+	}
+	return diagnostic{
+		Range:    spanRange(d.Line, d.Column, d.EndColumn),
+		Severity: sev,
+		Source:   "quell",
+		Code:     d.Code,
+		Message:  d.Message,
+	}
+}
+
+func spanRange(line, col, endCol int) lspRange {
+	if line < 1 {
+		line = 1
+	}
+	if col < 1 {
+		col = 1
+	}
+	if endCol < col {
+		endCol = col + 1
+	}
+	return lspRange{
+		Start: position{Line: line - 1, Character: col - 1},
+		End:   position{Line: line - 1, Character: endCol - 1},
+	}
+}
+
 // ─── LSP types (the minimal subset this server needs) ───────────────────
 
 type position struct {
@@ -218,6 +275,7 @@ type diagnostic struct {
 	Range    lspRange `json:"range"`
 	Severity int      `json:"severity"`
 	Source   string   `json:"source"`
+	Code     string   `json:"code,omitempty"`
 	Message  string   `json:"message"`
 }
 

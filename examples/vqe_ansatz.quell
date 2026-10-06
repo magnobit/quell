@@ -1,0 +1,18 @@
+// One-parameter ansatz with a toy two-qubit Hamiltonian. The coefficients are
+// illustrative, not a chemistry result.
+//
+//   quell draw    vqe_ansatz.quell
+//   quell observe vqe_ansatz.quell --param theta=0.7
+//   quell gradient vqe_ansatz.quell --param theta=0.7
+//   quell vqe     vqe_ansatz.quell
+//
+// All four run on the local statevector with exact expectation. No provider
+// is contacted.
+
+PARAM theta : angle
+observable h = -1.05 * Z(0) + 0.39 * Z(1) + 0.18 * X(0) * X(1)
+
+X 0
+RY theta 1
+CNOT 1 0
+MEASURE

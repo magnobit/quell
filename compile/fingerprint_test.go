@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestFingerprint_ChangesWithTargetAndVersionInputs(t *testing.T) {
+	src := "H 0\nMEASURE"
+	a := Fingerprint(src, "qiskit", true)
+	b := Fingerprint(src, "qiskit", true)
+	if a != b || len(a) != 64 {
+		t.Fatalf("fingerprint = %q", a)
+	}
+	if Fingerprint(src, "cirq", true) == a {
+		t.Fatal("target did not change fingerprint")
+	}
+	if Fingerprint(src, "qiskit", false) == a {
+		t.Fatal("optimize flag did not change fingerprint")
+	}
+	if Fingerprint(src+"\n", "qiskit", true) == a {
+		t.Fatal("source did not change fingerprint")
+	}
+}
+
 func TestHashIR_DeterministicForSameSource(t *testing.T) {
 	src := "H 0\nCNOT 0 1\nMEASURE"
 	a, err := HashIR(src, nil)

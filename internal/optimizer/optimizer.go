@@ -170,9 +170,12 @@ func withOps(p *ir.Program, ops []ir.Op) *ir.Program {
 		NumQubits:             p.NumQubits,
 		Ops:                   ops,
 		Params:                append([]string(nil), p.Params...),
+		Host:                  append([]ir.HostLocal(nil), p.Host...),
+		Funcs:                 append([]ir.HostFunc(nil), p.Funcs...),
 		NoiseDepolarizing:     p.NoiseDepolarizing,
 		NoiseAmplitudeDamping: p.NoiseAmplitudeDamping,
 		NoisePhaseDamping:     p.NoisePhaseDamping,
+		NoiseBitFlip:          p.NoiseBitFlip,
 		NoiseReadout:          p.NoiseReadout,
 	}
 }

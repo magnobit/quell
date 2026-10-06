@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
 	"github.com/magnobit/quell/simulate"
@@ -28,7 +29,10 @@ func newSimulateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			circ, err := parser.ParseFile(args[0])
 			if err != nil {
-				return fmt.Errorf("parse error: %w", err)
+				return err
+			}
+			if err := check.Fail(circ); err != nil {
+				return err
 			}
 
 			fmt.Printf("Qubits  : %d\n", circ.NumQubits)
@@ -39,7 +43,8 @@ func newSimulateCmd() *cobra.Command {
 				return err
 			}
 			if noise.Active() {
-				fmt.Printf("Noise   : depolarizing=%g amplitude_damping=%g\n", noise.Depolarizing, noise.AmplitudeDamping)
+				fmt.Printf("Noise   : depolarizing=%g amplitude_damping=%g phase_damping=%g bit_flip=%g readout=%g\n",
+					noise.Depolarizing, noise.AmplitudeDamping, noise.PhaseDamping, noise.BitFlip, noise.ReadoutError)
 			}
 
 			prog := ir.Lower(circ)
@@ -53,7 +58,7 @@ func newSimulateCmd() *cobra.Command {
 	}
 
 	cmd.Flags().IntVar(&shots, "shots", 1000, "number of measurement samples")
-	cmd.Flags().StringArrayVar(&noiseFlags, "noise", nil, "noise model: depolarizing=0.01 or amplitude_damping=0.05 (repeatable)")
+	cmd.Flags().StringArrayVar(&noiseFlags, "noise", nil, "noise model: depolarizing|amplitude_damping|phase_damping|bit_flip|readout=<p> (repeatable)")
 	return cmd
 }
 

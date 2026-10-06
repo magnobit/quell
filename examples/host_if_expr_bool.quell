@@ -1,0 +1,10 @@
+fn bit(x: bool) -> bool {
+    return if x {
+        true
+    } else {
+        false
+    }
+}
+let b: bool = bit(true)
+H 0
+MEASURE

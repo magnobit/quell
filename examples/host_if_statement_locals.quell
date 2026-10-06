@@ -1,0 +1,12 @@
+fn f(y: int) -> int {
+    if y < 0 {
+        let y: int = 4
+        return y
+    } else {
+        let y: int = y + 1
+        return y
+    }
+}
+let n: int = f(2)
+H 0
+MEASURE

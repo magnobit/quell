@@ -22,6 +22,13 @@ type Config struct {
 	DWave   DWaveConfig   `yaml:"dwave"`
 	NVIDIA  NVIDIAConfig  `yaml:"nvidia"`
 	Intel   IntelConfig   `yaml:"intel"`
+	Cloud   CloudConfig   `yaml:"cloud"`
+}
+
+// CloudConfig is the QubitLabs job API, not a hardware provider token.
+// The API key stays in QUBITLABS_API_KEY or --api-key and is not a config field.
+type CloudConfig struct {
+	Endpoint string `yaml:"endpoint"`
 }
 
 type LocalConfig struct {

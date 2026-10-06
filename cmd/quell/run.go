@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/magnobit/quell/adapter"
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/config"
 	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
@@ -47,6 +48,9 @@ Local noise models: --noise depolarizing=0.01 (also NOISE in source).`,
 			circ, err := parser.ParseFile(args[0])
 			if err != nil {
 				return fmt.Errorf("parse error: %w", err)
+			}
+			if err := check.Fail(circ); err != nil {
+				return err
 			}
 
 			cfg := loadConfigFrom(configPath)
@@ -284,7 +288,6 @@ func runOnBackend(cfg *config.Config, circ *parser.Circuit, quellSource string, 
 	result.Print()
 	return nil
 }
-
 
 func parseParamFlags(flags []string) (map[string]float64, error) {
 	out := map[string]float64{}

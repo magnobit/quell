@@ -5,9 +5,9 @@
 
 **Private.** This repo is Magnobit's proprietary quantum compiler/runtime — see [LICENSE](LICENSE). It's the engine behind Qubit Cloud, QubitLabs, and the public, Apache-2.0-licensed [quell-cli](https://github.com/magnobit/quell-cli), which depends on this module but doesn't contain its source. Don't add public-facing framing (open-source badges, public install instructions, external contributor workflow) back into this README — that belongs in quell-cli, not here.
 
-**The simplest quantum programming language. Write once, run on any platform.**
+**Quell is a readable, provider-independent quantum programming language and compiler toolchain built around a canonical IR, multi-target compilation, optimization, simulation, interoperability, and integration with the QubitLabs execution platform.**
 
-One `.quell` file. One config line to switch backends. No rewrites.
+This repository is the proprietary compiler and runtime. The public [quell-cli](https://github.com/magnobit/quell-cli) is separately licensed (Apache-2.0). A public CLI does not make this module open source.
 
 ```quell
 H 0
@@ -15,21 +15,43 @@ CNOT 0 1
 MEASURE
 ```
 
-That's a Bell pair. Three lines. Runs on IBM Quantum, AWS Braket, or Google Quantum Engine — just change one line in `quell.config.yml`.
+That's a Bell pair. Three lines. `quell run` simulates it locally. `quell compile` emits Qiskit, OpenQASM 2, OpenQASM 3, Cirq, Braket, or Q#. Submitting to a provider is a separate, authenticated Qubit Cloud step — not a claim that every backend is live from this CLI.
 
 ---
 
-## vs every other quantum language
+## What works today
 
-| | Quell | Qiskit | Q# | Cirq | OpenQASM |
-|---|---|---|---|---|---|
-| **Syntax** | Human-readable | Python + boilerplate | .NET + types | Python + boilerplate | Assembly |
-| **Multi-backend** | ✅ Native | ✗ IBM only | ✗ Azure only | ✗ Google only | ✗ Compile-only |
-| **Install** | `go install` or Docker | pip + 50 MB | dotnet SDK | pip + 50 MB | None |
-| **Run on real QPU** | ✅ One config line | Manual API setup | Manual setup | Manual setup | External tooling |
-| **Browser native** | ✅ QubitLabs | ✗ | ✗ | ✗ | ✗ |
-| **AI assistant** | ✅ Built-in | ✗ | ✗ | ✗ | ✗ |
-| **Named qubits** | ✅ `qubit alice, bob` | ✗ | ✗ | ✗ | ✗ |
+- `.quell` source: gates, named qubits, `PARAM`, immutable `let` (`bool`, `int`, `float`, `string`), host `fn`, lowercase host `if` expressions, imports, parse-time `gate` macros
+- Dynamic control: `IF` / `ELSE`, `WHILE … MAX`, `SWITCH`, mid-circuit `MEASURE`, `RESET`, `ASSERT`, `PAR`
+- Canonical IR, conservative optimizer, optional topology routing
+- Local statevector simulation and noise (24-qubit cap)
+- Compile targets: Qiskit, OpenQASM 2, OpenQASM 3, Cirq, Braket, Q#
+- OpenQASM import and Qiskit / Cirq / Q# converters
+- CLI, formatter, LSP, git-based packages
+
+Qiskit, Cirq, Q#, CUDA-Q, and OpenQASM are mature projects with their own control flow, simulators, and hardware paths. Quell does not replace them, and it is not faster than them by any published benchmark in this repo. QubitLabs governance, scheduling, provenance, and Verify are platform features, not compiler features.
+
+## Roadmap (not implemented)
+
+QIR as a complete interchange (today: a checked base-profile subset), execution of QIR on qir-runner, a full CUDA-Q IR adapter, any CUDA-Q GPU run, the parameter-shift rule, and package lock enforcement on every fetch. Host `fn`, `let`, `var`, host `if` / `for` / `while`, arrays, qubit registers, `quantum fn`, observables with exact local `expectation`, and host task calls through the existing scheduler are implemented. The current NVIDIA path is an optional Python fallback and must not be described as GPU success when it uses the local simulator.
+
+## Why Quell
+
+Source is a `.quell` file, not a provider SDK. It lowers to canonical IR, then simulates locally or prints a supported target. QubitLabs governance, scheduling, provenance, and Verify sit beside that pipeline. They are not compiler passes.
+
+## Control flow
+
+Compile-time: `FOR` unrolls and `gate` macros expand. Host code evaluates lowercase `if`, `for`, and `while`, plus immutable `let` and mutable `var`, on `bool`, `int`, `float`, and `string`. Dynamic control that the local simulator runs is uppercase `IF` / `ELSE`, `WHILE … MAX`, `SWITCH`, mid-circuit `MEASURE`, `RESET`, and `ASSERT`. Details are in [SPEC.md](SPEC.md).
+
+## Security
+
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md). Do not put provider tokens in a `.quell` file.
+
+## Read next
+
+- Language rules: [SPEC.md](SPEC.md)
+- Public learning (QubitLabs, no account): `/quell/learn`, `/quell/examples`, `/quell/why-quell`, `/quell/compare`, `/quell/migrate/qiskit`
+- Practice, saved circuits, and the account-bound converter at `/migrate` stay behind sign-in. `quell convert` on a machine with this toolchain does not need a cloud login.
 
 ---
 
@@ -45,7 +67,7 @@ cd quell && go build ./cmd/quell
 # Run locally (shows OpenQASM preview)
 quell run examples/bell.quell
 
-# Compile to any backend format
+# Compile to a supported target
 quell compile --target qiskit   examples/bell.quell
 quell compile --target openqasm examples/bell.quell
 quell compile --target cirq     examples/bell.quell
@@ -54,8 +76,15 @@ quell compile --target braket   examples/bell.quell
 # Disable the IR optimizer (on by default) to see the raw, unoptimized output
 quell compile --target qiskit --no-optimize examples/bell.quell
 
-# Run on IBM Quantum (after configuring quell.config.yml)
-quell run examples/bell.quell   # backend: ibm in config → submits to IBM
+# Local simulation (no provider credentials, no queue time)
+quell run examples/bell.quell
+
+# Inspect a circuit on the local statevector (exact, no provider)
+quell draw     examples/bell.quell
+quell state    examples/bell.quell
+quell observe  examples/vqe_ansatz.quell --param theta=0.7
+quell gradient examples/vqe_ansatz.quell --param theta=0.7
+quell vqe      examples/vqe_ansatz.quell
 
 # Format a .quell file (canonical style: uppercase gate names, aligned comments)
 quell fmt --write examples/bell.quell
@@ -236,9 +265,9 @@ local:
   shots: 1024
 ```
 
-Previews the OpenQASM 3 output. For full simulation use the [QubitLabs Playground](https://qubitlabs.magnobit.com).
+Previews the OpenQASM 3 output. For full simulation use the [QubitLabs Practice](https://qubitlabs.magnobit.com/practice) simulator after sign-in.
 
-**Switch backends with one line change. Same `.quell` file, zero code changes.**
+The same `.quell` file compiles to the supported targets below. Changing a compile flag does not by itself submit a provider job.
 
 ---
 
@@ -286,7 +315,6 @@ MEASURE
 | `CSWAP` | `CSWAP c q0 q1` | Fredkin (controlled-SWAP) |
 | `MEASURE` | `MEASURE` | Measure all qubits |
 | `MEASURE n` | `MEASURE 0` | Measure qubit n |
-| `M` | `M` | Alias for MEASURE |
 
 Angles are in radians. Common values: `π/2 = 1.5708`, `π/4 = 0.7854`, `π = 3.1416`.
 
@@ -294,14 +322,14 @@ Angles are in radians. Common values: `π/2 = 1.5708`, `π/4 = 0.7854`, `π = 3.
 
 ## Compile targets
 
-| Target | Flag | Language | Used by |
+| Target | Flag | Language | What the printer emits |
 |---|---|---|---|
-| OpenQASM 3 | `--target openqasm` | openqasm | IBM, AWS, Google, any hardware |
-| OpenQASM 2 | `--target openqasm2` | openqasm | Legacy QASM tools |
-| Qiskit | `--target qiskit` | Python | IBM Quantum / Aer simulator |
-| Cirq | `--target cirq` | Python | Google Quantum AI |
-| Braket SDK | `--target braket` | Python | AWS Braket |
-| Q# | `--target qsharp` | Q# | Azure Quantum / Microsoft QDK |
+| OpenQASM 3 | `--target openqasm` | OpenQASM | OpenQASM 3 text. Not a claim that every device accepts it. |
+| OpenQASM 2 | `--target openqasm2` | OpenQASM | OpenQASM 2 subset |
+| Qiskit | `--target qiskit` | Python | Qiskit `QuantumCircuit` source. Qiskit is not IBM-only. |
+| Cirq | `--target cirq` | Python | Cirq source. Cirq is not Google-only. |
+| Braket SDK | `--target braket` | Python | Amazon Braket SDK source |
+| Q# | `--target qsharp` | Q# | Q# source. Q# is not Azure-only. |
 
 ```bash
 quell compile --target qiskit   --output bell_qiskit.py  examples/bell.quell
@@ -316,7 +344,7 @@ quell compile --target qsharp   --output bell.qs         examples/bell.quell
 ```go
 import "github.com/magnobit/quell/compile"
 
-// Compile Quell source to any target (optimizer enabled by default)
+// Compile Quell source to one supported target (optimizer enabled by default)
 result, err := compile.Compile(`
   qubit alice, bob
   H alice
@@ -332,7 +360,7 @@ r.Warnings       // non-fatal semantic warnings (e.g. missing MEASURE)
 r.OptimizerNotes // e.g. "removed 2 redundant gate(s) on qubit 0"
 ```
 
-Available targets: `compile.Qiskit`, `compile.OpenQASM`, `compile.Cirq`, `compile.Braket`
+Available targets: `compile.Qiskit`, `compile.OpenQASM`, `compile.OpenQASM2`, `compile.Cirq`, `compile.Braket`, `compile.QSharp`. `compile.CompileMany` parses and optimizes once, then emits each target.
 
 For real hardware execution (what quell-cli and Qubit Cloud's hosted API both use), see `github.com/magnobit/quell/execute` — it re-exports the per-backend credential types and `RunIBM`/`RunAWS`/`RunGoogle`/`RunRigetti`/`RunIonQ`/`RunAzure`/`RunDWave`, plus `Config`/`Load`/`Default` for `quell.config.yml`-based callers, so nothing outside this module needs to touch `internal/backends` or `internal/config` directly.
 
@@ -369,16 +397,18 @@ quell/
 
 ---
 
-## Bell pair — the same circuit, four languages
+## Bell pair — the same circuit in other toolchains
 
-**Quell** — 3 lines
+Line count is not a quality score. These listings are the same entanglement pattern, written in each toolchain's own style.
+
+**Quell**
 ```quell
 H 0
 CNOT 0 1
 MEASURE
 ```
 
-**Qiskit** — 7 lines + imports
+**Qiskit**
 ```python
 from qiskit import QuantumCircuit
 qc = QuantumCircuit(2, 2)
@@ -387,14 +417,14 @@ qc.cx(0, 1)
 qc.measure_all()
 ```
 
-**Cirq** — 6 lines + imports
+**Cirq**
 ```python
 import cirq
 q = cirq.LineQubit.range(2)
 circuit = cirq.Circuit([cirq.H(q[0]), cirq.CNOT(q[0], q[1]), cirq.measure(*q)])
 ```
 
-**Braket** — 5 lines + imports
+**Braket**
 ```python
 from braket.circuits import Circuit
 circuit = Circuit().h(0).cnot(0, 1)
@@ -404,7 +434,7 @@ circuit = Circuit().h(0).cnot(0, 1)
 
 ## Internal development checklist
 
-- Every new gate must be implemented in all four compile targets
+- Every new gate must be implemented in every target listed in `compile.Targets` (Qiskit, OpenQASM 3, OpenQASM 2, Cirq, Braket, Q#)
 - Run `go test ./...` before submitting
 - Add `// Copyright 2026 Magnobit, Inc. All rights reserved.` to new files
 - New backends go in `internal/backends/`

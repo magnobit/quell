@@ -1,0 +1,14 @@
+fn nest(x: int) -> int {
+    return if x > 0 {
+        if x > 10 {
+            x
+        } else {
+            1
+        }
+    } else {
+        0
+    }
+}
+let n: int = nest(3)
+H 0
+MEASURE

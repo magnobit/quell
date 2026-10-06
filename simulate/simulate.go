@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
 )
@@ -329,6 +330,9 @@ func Run(src string, shots int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := check.Fail(c); err != nil {
+		return nil, err
+	}
 	return RunProgramOpts(ir.Lower(c), Options{Shots: shots})
 }
 
@@ -338,11 +342,19 @@ func Run(src string, shots int) (*Result, error) {
 // callers (like the CLI) that need import support rather than working from
 // an in-memory source string.
 func RunFile(path string, shots int) (*Result, error) {
+	return RunFileOpts(path, Options{Shots: shots})
+}
+
+// RunFileOpts is RunFile with an explicit Options, including noise.
+func RunFileOpts(path string, opt Options) (*Result, error) {
 	c, err := parser.ParseFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return RunProgramOpts(ir.Lower(c), Options{Shots: shots})
+	if err := check.Fail(c); err != nil {
+		return nil, err
+	}
+	return RunProgramOpts(ir.Lower(c), opt)
 }
 
 // RunProgram simulates an already-lowered IR program — the entry point for
@@ -374,6 +386,7 @@ func RunProgramOpts(p *ir.Program, opt Options) (*Result, error) {
 		Depolarizing:     p.NoiseDepolarizing,
 		AmplitudeDamping: p.NoiseAmplitudeDamping,
 		PhaseDamping:     p.NoisePhaseDamping,
+		BitFlip:          p.NoiseBitFlip,
 		ReadoutError:     p.NoiseReadout,
 	}
 	noise = MergeNoise(noise, opt.Noise)

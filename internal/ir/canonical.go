@@ -34,6 +34,10 @@ func CanonicalBytes(p *Program) []byte {
 	writeFloatLine(&b, "noise_depolarizing", p.NoiseDepolarizing)
 	writeFloatLine(&b, "noise_amplitude_damping", p.NoiseAmplitudeDamping)
 	writeFloatLine(&b, "noise_phase_damping", p.NoisePhaseDamping)
+	// bit_flip is omitted at 0 so existing quell-ir-v1 hashes stay stable.
+	if p.NoiseBitFlip > 0 {
+		writeFloatLine(&b, "noise_bit_flip", p.NoiseBitFlip)
+	}
 	writeFloatLine(&b, "noise_readout", p.NoiseReadout)
 	b.WriteString("ops\n")
 	writeOps(&b, p.Ops, 0)

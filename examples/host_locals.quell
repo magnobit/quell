@@ -1,0 +1,13 @@
+// Host locals are immutable and are not circuit parameters.
+// Run: quell compile examples/host_locals.quell
+// The lets are checked, then omitted from the target text.
+
+let shots: int = 1000
+let theta: float = 1.5708
+let enabled: bool = true
+let label: string = "baseline"
+let total: int = shots + 0
+
+H 0
+CNOT 0 1
+MEASURE

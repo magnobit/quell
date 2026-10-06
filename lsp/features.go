@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/parser"
 )
 
@@ -116,6 +117,63 @@ func qubitDeclsIn(text string) []parser.QubitDecl {
 
 var qubitDeclRe = regexp.MustCompile(`(?i)^qubit\s+(.+)$`)
 
+func localsIn(text string) []parser.HostDecl {
+	c, err := parser.Parse(text)
+	if err != nil {
+		return nil
+	}
+	var out []parser.HostDecl
+	for _, h := range c.Host {
+		if h.Kind == "let" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func functionsIn(text string) []parser.FnDecl {
+	c, err := parser.Parse(text)
+	if err != nil {
+		return nil
+	}
+	return c.Functions
+}
+
+func findFunction(text, name string) (parser.FnDecl, bool) {
+	for _, fn := range functionsIn(text) {
+		if fn.Name == name {
+			return fn, true
+		}
+	}
+	return parser.FnDecl{}, false
+}
+
+func functionAt(text string, line1 int) (parser.FnDecl, bool) {
+	for _, fn := range functionsIn(text) {
+		if line1 >= fn.Line && (fn.EndLine == 0 || line1 <= fn.EndLine) {
+			return fn, true
+		}
+	}
+	return parser.FnDecl{}, false
+}
+
+func fnSignature(fn parser.FnDecl) string {
+	parts := make([]string, len(fn.Params))
+	for i, p := range fn.Params {
+		parts[i] = p.Name + ": " + p.Type
+	}
+	return fmt.Sprintf("fn %s(%s) -> %s", fn.Name, strings.Join(parts, ", "), fn.Ret)
+}
+
+func findLocal(text, name string) (parser.HostDecl, bool) {
+	for _, h := range localsIn(text) {
+		if h.Name == name {
+			return h, true
+		}
+	}
+	return parser.HostDecl{}, false
+}
+
 // findQubitDecl looks up name (case-sensitive — unlike macros, Quell never
 // upper-cases named qubits, so "alice" and "Alice" are genuinely different
 // qubits) among text's qubit declarations.
@@ -139,6 +197,43 @@ func (s *server) hover(id json.RawMessage, uri string, pos position) {
 	word, _, _, ok := wordAt(text, pos)
 	if !ok {
 		s.respond(id, nil)
+		return
+	}
+	if word == "if" {
+		if circ, err := parser.Parse(text); err == nil {
+			switch parser.HostIfKindAt(circ, pos.Line+1) {
+			case "expr":
+				if typ, found := check.IfTypeAt(circ, pos.Line+1); found {
+					md := fmt.Sprintf("`if` → `%s`\n\nHost conditional expression. Both branches have type `%s`. Only the selected branch is evaluated. This is not QPU `IF`.", typ, typ)
+					s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: md}})
+					return
+				}
+				s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: "Host conditional expression. It yields one value. This is not QPU `IF`."}})
+				return
+			case "stmt":
+				s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: "Host `if` statement. Only the selected branch runs. Both branches are typechecked. This is not QPU `IF` and it does not yield a value."}})
+				return
+			}
+		}
+	}
+	if b, found := bindingAt(text, pos, word); found {
+		md := fmt.Sprintf("**%s** : `%s`\n\n%s", b.name, b.typ, b.note)
+		s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: md}})
+		return
+	}
+	if fn, found := findFunction(text, word); found {
+		md := fmt.Sprintf("**%s**\n\n`%s`\n\nHost function at line %d. This is not a gate macro.", fn.Name, fnSignature(fn), fn.Line)
+		s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: md}})
+		return
+	}
+	if h, found := findLocal(text, word); found {
+		md := fmt.Sprintf("**%s** : `%s`\n\nImmutable host local, declared at line %d. This is not a PARAM.", h.Name, h.Type, h.Line)
+		s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: md}})
+		return
+	}
+	if parser.IsHostType(word) {
+		md := fmt.Sprintf("`%s`\n\nHost scalar type for `let`. It is not a qubit type and not a PARAM type.", word)
+		s.respond(id, hoverResult{Contents: markupContent{Kind: "markdown", Value: md}})
 		return
 	}
 	upper := strings.ToUpper(word)
@@ -194,6 +289,65 @@ func (s *server) completion(id json.RawMessage, uri string) {
 			InsertText:    m.Name,
 		})
 	}
+	for _, fn := range functionsIn(text) {
+		items = append(items, completionItem{
+			Label:         fn.Name,
+			Kind:          3,
+			Detail:        fnSignature(fn),
+			Documentation: "Host function. Not a gate macro.",
+			InsertText:    fn.Name,
+		})
+		for _, p := range fn.Params {
+			items = append(items, completionItem{
+				Label:         p.Name,
+				Kind:          6,
+				Detail:        p.Type + " parameter",
+				Documentation: fnSignature(fn),
+				InsertText:    p.Name,
+			})
+		}
+		for _, st := range fn.Body {
+			if st.Kind != "let" {
+				continue
+			}
+			items = append(items, completionItem{
+				Label:         st.Decl.Name,
+				Kind:          6,
+				Detail:        st.Decl.Type + " function local",
+				Documentation: fmt.Sprintf("let %s: %s in %s", st.Decl.Name, st.Decl.Type, fn.Name),
+				InsertText:    st.Decl.Name,
+			})
+		}
+	}
+	if circ, err := parser.Parse(text); err == nil {
+		visitHostExprs(circ, func(e parser.Expr, _, _ int) {
+			parser.WalkIf(e, func(n *parser.IfExpr) {
+				addBlockLets(&items, n.Then)
+				addBlockLets(&items, n.Else)
+			})
+		})
+		for _, f := range circ.Functions {
+			addStmtBranchLets(&items, f.Body)
+		}
+	}
+	for _, name := range []string{"bool", "int", "float", "string"} {
+		items = append(items, completionItem{
+			Label:         name,
+			Kind:          14, // Keyword
+			Detail:        "host scalar type",
+			Documentation: "Type of an immutable let. Not a PARAM and not a qubit.",
+			InsertText:    name,
+		})
+	}
+	for _, h := range localsIn(text) {
+		items = append(items, completionItem{
+			Label:         h.Name,
+			Kind:          6, // Variable
+			Detail:        h.Type + " local",
+			Documentation: fmt.Sprintf("let %s: %s, line %d", h.Name, h.Type, h.Line),
+			InsertText:    h.Name,
+		})
+	}
 	for _, d := range qubitDeclsIn(text) {
 		items = append(items, completionItem{
 			Label:         d.Name,
@@ -201,6 +355,15 @@ func (s *server) completion(id json.RawMessage, uri string) {
 			Detail:        fmt.Sprintf("named qubit (line %d)", d.Line),
 			Documentation: fmt.Sprintf("qubit %s — declared at line %d", d.Name, d.Line),
 			InsertText:    d.Name,
+		})
+	}
+	for _, sym := range importedSymbols(uri, text) {
+		items = append(items, completionItem{
+			Label:         sym.Name,
+			Kind:          sym.Kind,
+			Detail:        sym.Detail,
+			Documentation: "Imported from " + sym.URI,
+			InsertText:    sym.Name,
 		})
 	}
 	s.respond(id, items)
@@ -257,12 +420,28 @@ func (s *server) definition(id json.RawMessage, uri string, pos position) {
 		s.respond(id, nil)
 		return
 	}
+	if b, found := bindingAt(text, pos, word); found {
+		s.respond(id, location{URI: uri, Range: lineRange(b.line)})
+		return
+	}
+	if fn, found := findFunction(text, word); found {
+		s.respond(id, location{URI: uri, Range: lineRange(fn.Line)})
+		return
+	}
+	if h, found := findLocal(text, word); found {
+		s.respond(id, location{URI: uri, Range: lineRange(h.Line)})
+		return
+	}
 	if m, found := findMacro(text, word); found {
 		s.respond(id, location{URI: uri, Range: lineRange(m.Line)})
 		return
 	}
 	if d, found := findQubitDecl(text, word); found {
 		s.respond(id, location{URI: uri, Range: lineRange(d.Line)})
+		return
+	}
+	if sym, found := importedSymbol(uri, text, word); found {
+		s.respond(id, location{URI: sym.URI, Range: lineRange(sym.Line)})
 		return
 	}
 	s.respond(id, nil)
@@ -327,12 +506,48 @@ func (s *server) rename(id json.RawMessage, uri string, pos position, newName st
 	// `Alice` are genuinely different qubits — so only exact-case
 	// occurrences may be touched.
 	var wordBoundary *regexp.Regexp
-	if _, found := findMacro(text, word); found {
+	if fn, found := findFunction(text, word); found {
+		if parser.IsReservedHostName(newName) {
+			s.respondError(id, -32602, fmt.Sprintf("%q is reserved and cannot be a function name", newName))
+			return
+		}
+		if _, clash := findFunction(text, newName); clash && newName != fn.Name {
+			s.respondError(id, -32602, fmt.Sprintf("a function named %q already exists in this file — pick a different name", newName))
+			return
+		}
+		if _, clash := findMacro(text, newName); clash {
+			s.respondError(id, -32602, fmt.Sprintf("a gate macro named %q already exists in this file — pick a different name", newName))
+			return
+		}
+		wordBoundary = regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+	} else if b, found := bindingAt(text, pos, word); found && b.fnLocal {
+		if parser.IsReservedHostName(newName) {
+			s.respondError(id, -32602, fmt.Sprintf("%q is reserved and cannot be a local name", newName))
+			return
+		}
+		wordBoundary = regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+		if b.blockEnd > 0 {
+			s.renameInRange(id, uri, text, wordBoundary, newName, b.blockLine, b.blockEnd)
+			return
+		}
+		s.renameInRange(id, uri, text, wordBoundary, newName, b.fnLine, b.fnEnd)
+		return
+	} else if _, found := findMacro(text, word); found {
 		if _, clash := findMacro(text, newName); clash {
 			s.respondError(id, -32602, fmt.Sprintf("a macro named %q already exists in this file — pick a different name", newName))
 			return
 		}
 		wordBoundary = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`)
+	} else if h, found := findLocal(text, word); found {
+		if parser.IsReservedHostName(newName) {
+			s.respondError(id, -32602, fmt.Sprintf("%q is reserved and cannot be a local name", newName))
+			return
+		}
+		if _, clash := findLocal(text, newName); clash && newName != h.Name {
+			s.respondError(id, -32602, fmt.Sprintf("a local named %q already exists in this file — pick a different name", newName))
+			return
+		}
+		wordBoundary = regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
 	} else if _, found := findQubitDecl(text, word); found {
 		if _, clash := findQubitDecl(text, newName); clash {
 			s.respondError(id, -32602, fmt.Sprintf("a qubit named %q already exists in this file — pick a different name", newName))
@@ -340,7 +555,7 @@ func (s *server) rename(id json.RawMessage, uri string, pos position, newName st
 		}
 		wordBoundary = regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
 	} else {
-		s.respondError(id, -32602, "rename is only supported for gate macro names and named qubits")
+		s.respondError(id, -32602, "rename is only supported for gate macro names, host functions, host locals, and named qubits")
 		return
 	}
 
@@ -373,6 +588,342 @@ func isIdentStart(s string) bool {
 	}
 	r := s[0]
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+}
+
+type hostBind struct {
+	name, typ, note string
+	line            int
+	fnLocal         bool
+	fnLine, fnEnd   int
+	blockLine       int
+	blockEnd        int
+}
+
+func innermostBlockBind(text string, pos position, word string) (hostBind, bool) {
+	circ, err := parser.Parse(text)
+	if err != nil {
+		return hostBind{}, false
+	}
+	line := pos.Line + 1
+	best := hostBind{}
+	bestSpan := int(^uint(0) >> 1)
+	found := false
+	consider := func(b *parser.BlockExpr, fnLine, fnEnd int) {
+		if b == nil || line < b.Line || (b.EndLine > 0 && line > b.EndLine) {
+			return
+		}
+		for _, d := range b.Lets {
+			if d.Name != word || line < d.Line {
+				continue
+			}
+			span := b.EndLine - b.Line
+			if b.EndLine == 0 {
+				span = bestSpan
+			}
+			if !found || span < bestSpan {
+				bestSpan = span
+				found = true
+				best = hostBind{
+					name: d.Name, typ: d.Type, line: d.Line, fnLocal: true,
+					fnLine: fnLine, fnEnd: fnEnd, blockLine: b.Line, blockEnd: b.EndLine,
+					note: "Immutable local in this host if branch. It is not visible in the other branch.",
+				}
+			}
+		}
+	}
+	visitHostExprs(circ, func(e parser.Expr, fnLine, fnEnd int) {
+		parser.WalkIf(e, func(n *parser.IfExpr) {
+			consider(n.Then, fnLine, fnEnd)
+			consider(n.Else, fnLine, fnEnd)
+		})
+	})
+	for _, f := range circ.Functions {
+		considerStmtLets(f.Body, f.Line, f.EndLine, &best, &bestSpan, &found, line, word)
+	}
+	return best, found
+}
+
+func visitHostExprs(c *parser.Circuit, fn func(parser.Expr, int, int)) {
+	if c == nil {
+		return
+	}
+	for _, h := range c.Host {
+		fn(h.Expr, 0, 0)
+	}
+	for _, f := range c.Functions {
+		walkFnExprs(f.Body, f.Line, f.EndLine, fn)
+	}
+}
+
+func walkFnExprs(stmts []parser.FnStmt, fnLine, fnEnd int, fn func(parser.Expr, int, int)) {
+	for _, st := range stmts {
+		switch st.Kind {
+		case "let", "assign":
+			fn(st.Decl.Expr, fnLine, fnEnd)
+		case "return":
+			fn(st.Expr, fnLine, fnEnd)
+		case "if":
+			if st.If != nil {
+				fn(st.If.Cond, fnLine, fnEnd)
+				walkFnExprs(st.If.Then, fnLine, fnEnd, fn)
+				walkFnExprs(st.If.Else, fnLine, fnEnd, fn)
+			}
+		case "for", "while":
+			if st.Loop != nil {
+				fn(st.Loop.Cond, fnLine, fnEnd)
+				fn(st.Loop.From, fnLine, fnEnd)
+				fn(st.Loop.To, fnLine, fnEnd)
+				walkFnExprs(st.Loop.Body, fnLine, fnEnd, fn)
+			}
+		}
+	}
+}
+
+func addStmtBranchLets(items *[]completionItem, stmts []parser.FnStmt) {
+	for _, st := range stmts {
+		if st.If == nil {
+			continue
+		}
+		addStmtLets(items, st.If.Then)
+		addStmtLets(items, st.If.Else)
+	}
+}
+
+func addStmtLets(items *[]completionItem, stmts []parser.FnStmt) {
+	for _, st := range stmts {
+		if st.Kind == "let" {
+			*items = append(*items, completionItem{
+				Label:         st.Decl.Name,
+				Kind:          6,
+				Detail:        fmt.Sprintf("%s branch local, line %d", st.Decl.Type, st.Line),
+				Documentation: "Visible only in this host if branch.",
+				InsertText:    st.Decl.Name,
+			})
+		}
+		if st.If != nil {
+			addStmtLets(items, st.If.Then)
+			addStmtLets(items, st.If.Else)
+		}
+	}
+}
+
+func considerStmtLets(stmts []parser.FnStmt, fnLine, fnEnd int, best *hostBind, bestSpan *int, found *bool, line int, word string) {
+	var walk func([]parser.FnStmt, int, int)
+	walk = func(body []parser.FnStmt, blockLine, blockEnd int) {
+		branch := !(blockLine == fnLine && blockEnd == fnEnd)
+		for _, st := range body {
+			if branch && st.Kind == "let" && st.Decl.Name == word && line >= st.Decl.Line && (blockLine == 0 || line >= blockLine) && (blockEnd == 0 || line <= blockEnd) {
+				span := blockEnd - blockLine
+				if blockEnd == 0 {
+					span = fnEnd - fnLine
+				}
+				if !*found || span < *bestSpan {
+					*bestSpan = span
+					*found = true
+					end := blockEnd
+					start := blockLine
+					if end == 0 {
+						start, end = fnLine, fnEnd
+					}
+					*best = hostBind{
+						name: st.Decl.Name, typ: st.Decl.Type, line: st.Decl.Line, fnLocal: true,
+						fnLine: fnLine, fnEnd: fnEnd, blockLine: start, blockEnd: end,
+						note: "Immutable local in this host if branch. It is not visible in the other branch.",
+					}
+				}
+			}
+			if st.If != nil {
+				walk(st.If.Then, st.If.ThenLine, st.If.ThenEnd)
+				walk(st.If.Else, st.If.ElseLine, st.If.ElseEnd)
+			}
+			if st.Loop != nil {
+				walk(st.Loop.Body, st.Loop.BodyLine, st.Loop.BodyEnd)
+			}
+		}
+	}
+	walk(stmts, fnLine, fnEnd)
+}
+
+func (s *server) folding(id json.RawMessage, uri string) {
+	text, ok := s.docs[uri]
+	if !ok {
+		s.respond(id, []any{})
+		return
+	}
+	circ, err := parser.Parse(text)
+	if err != nil {
+		s.respond(id, []any{})
+		return
+	}
+	type fr struct {
+		StartLine int    `json:"startLine"`
+		EndLine   int    `json:"endLine"`
+		Kind      string `json:"kind"`
+	}
+	var out []fr
+	add := func(start, end int) {
+		if start < 1 || end <= start {
+			return
+		}
+		out = append(out, fr{StartLine: start - 1, EndLine: end - 1, Kind: "region"})
+	}
+	var walk func([]parser.FnStmt)
+	walk = func(stmts []parser.FnStmt) {
+		for _, st := range stmts {
+			if st.Kind == "let" || st.Kind == "assign" {
+				parser.WalkIf(st.Decl.Expr, func(n *parser.IfExpr) { add(n.Line, n.EndLine) })
+			}
+			if st.Kind == "return" {
+				parser.WalkIf(st.Expr, func(n *parser.IfExpr) { add(n.Line, n.EndLine) })
+			}
+			if st.If != nil {
+				add(st.If.Line, st.If.EndLine)
+				walk(st.If.Then)
+				walk(st.If.Else)
+			}
+		}
+	}
+	for _, f := range circ.Functions {
+		walk(f.Body)
+	}
+	for _, h := range circ.Host {
+		parser.WalkIf(h.Expr, func(n *parser.IfExpr) { add(n.Line, n.EndLine) })
+	}
+	if out == nil {
+		s.respond(id, []any{})
+		return
+	}
+	s.respond(id, out)
+}
+
+func addBlockLets(items *[]completionItem, b *parser.BlockExpr) {
+	if b == nil {
+		return
+	}
+	for _, d := range b.Lets {
+		*items = append(*items, completionItem{
+			Label:         d.Name,
+			Kind:          6,
+			Detail:        fmt.Sprintf("%s branch local, line %d", d.Type, d.Line),
+			Documentation: "Visible only in this host if branch.",
+			InsertText:    d.Name,
+		})
+	}
+}
+
+func bindingAt(text string, pos position, word string) (hostBind, bool) {
+	if b, ok := innermostBlockBind(text, pos, word); ok {
+		return b, true
+	}
+	fn, inside := functionAt(text, pos.Line+1)
+	if !inside {
+		return hostBind{}, false
+	}
+	for _, p := range fn.Params {
+		if p.Name == word {
+			return hostBind{
+				name: p.Name, typ: p.Type, line: fn.Line, fnLocal: true, fnLine: fn.Line, fnEnd: fn.EndLine,
+				note: "Immutable function parameter of " + fn.Name + ". This is not a PARAM.",
+			}, true
+		}
+	}
+	for _, st := range fn.Body {
+		if st.Kind == "let" && st.Decl.Name == word {
+			return hostBind{
+				name: st.Decl.Name, typ: st.Decl.Type, line: st.Line, fnLocal: true, fnLine: fn.Line, fnEnd: fn.EndLine,
+				note: "Immutable local in " + fn.Name + ".",
+			}, true
+		}
+	}
+	return hostBind{}, false
+}
+
+func (s *server) renameInRange(id json.RawMessage, uri, text string, wordBoundary *regexp.Regexp, newName string, line1, end1 int) {
+	var edits []textEdit
+	for i, line := range docLines(text) {
+		n := i + 1
+		if n < line1 || (end1 > 0 && n > end1) {
+			continue
+		}
+		code := line
+		if ci := strings.Index(line, "//"); ci >= 0 {
+			code = line[:ci]
+		}
+		for _, loc := range wordBoundary.FindAllStringIndex(code, -1) {
+			edits = append(edits, textEdit{
+				Range:   lspRange{Start: position{Line: i, Character: loc[0]}, End: position{Line: i, Character: loc[1]}},
+				NewText: newName,
+			})
+		}
+	}
+	if len(edits) == 0 {
+		s.respond(id, nil)
+		return
+	}
+	s.respond(id, workspaceEdit{Changes: map[string][]textEdit{uri: edits}})
+}
+
+// signatureHelp reports the host function under the cursor when the user is
+// inside a call. Conversions and gates are left to hover.
+func (s *server) signatureHelp(id json.RawMessage, uri string, pos position) {
+	text, ok := s.docs[uri]
+	if !ok {
+		s.respond(id, nil)
+		return
+	}
+	lines := docLines(text)
+	if pos.Line < 0 || pos.Line >= len(lines) {
+		s.respond(id, nil)
+		return
+	}
+	line := lines[pos.Line]
+	if pos.Character < 0 || pos.Character > len(line) {
+		s.respond(id, nil)
+		return
+	}
+	name := callNameBefore(line[:pos.Character])
+	fn, found := findFunction(text, name)
+	if !found {
+		s.respond(id, nil)
+		return
+	}
+	s.respond(id, map[string]any{
+		"signatures": []map[string]any{{
+			"label": fnSignature(fn),
+			"documentation": map[string]string{
+				"kind":  "markdown",
+				"value": "Host function. Arguments are immutable scalars.",
+			},
+		}},
+		"activeSignature": 0,
+	})
+}
+
+func callNameBefore(prefix string) string {
+	i := strings.LastIndex(prefix, "(")
+	if i < 0 {
+		return ""
+	}
+	j := i - 1
+	for j >= 0 && (prefix[j] == ' ' || prefix[j] == '\t') {
+		j--
+	}
+	if j < 0 {
+		return ""
+	}
+	end := j + 1
+	for j >= 0 && (isIdentByte(prefix[j])) {
+		j--
+	}
+	name := prefix[j+1 : end]
+	if name == "" || !isIdentStart(name) {
+		return ""
+	}
+	return name
+}
+
+func isIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' || (b >= '0' && b <= '9')
 }
 
 // ─── file:// URI helpers ───────────────────────────────────────────────────

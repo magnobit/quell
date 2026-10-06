@@ -23,6 +23,9 @@ var exampleParams = map[string]map[string]float64{
 	"trotter_step.quell": {
 		"theta": 0.3,
 	},
+	"vqe_ansatz.quell": {
+		"theta": 0.7,
+	},
 }
 
 func TestExamplesParseCompileSimulate(t *testing.T) {
@@ -48,11 +51,11 @@ func TestExamplesParseCompileSimulate(t *testing.T) {
 				t.Fatalf("parse: %v", err)
 			}
 			if params, ok := exampleParams[name]; ok {
-				bound, berr := estimate.BindSource(text, params)
+				bound, berr := estimate.BindMany(text, []map[string]float64{params})
 				if berr != nil {
 					t.Fatalf("bind: %v", berr)
 				}
-				text = bound
+				text = bound[0]
 			}
 			if _, err := compile.Compile(text, compile.OpenQASM); err != nil {
 				t.Fatalf("compile openqasm: %v", err)

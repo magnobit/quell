@@ -148,3 +148,26 @@ func TestParseRejectsImportOnBareSource(t *testing.T) {
 		t.Errorf("expected error to point at ParseFile, got: %v", err)
 	}
 }
+
+func TestNestedImport(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "c.quell", "X 0\n")
+	writeFile(t, dir, "b.quell", "import \"./c.quell\"\nH 0\n")
+	main := writeFile(t, dir, "a.quell", "import \"./b.quell\"\nMEASURE\n")
+	circ, err := ParseFile(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(circ.Instructions) != 3 || circ.Instructions[0].Gate != "X" {
+		t.Fatalf("%+v", circ.Instructions)
+	}
+}
+
+func TestImportAliasIsNotANamespace(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "lib.quell", "H 0\n")
+	main := writeFile(t, dir, "main.quell", "import bell \"./lib.quell\"\nMEASURE\n")
+	if _, err := ParseFile(main); err == nil {
+		t.Fatal("import alias is not accepted")
+	}
+}

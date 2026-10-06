@@ -1,0 +1,10 @@
+fn sum(n: int) -> int {
+    var total: int = 0
+    for i in 1..n {
+        total = total + i
+    }
+    return total
+}
+let s: int = sum(3)
+H 0
+MEASURE

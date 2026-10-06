@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/magnobit/quell/qerr"
 )
 
 // Instruction represents a single parsed gate operation.
@@ -55,10 +57,22 @@ type Circuit struct {
 	Params       []string    // unbound symbolic angle names declared/used
 	Warnings     []string    // non-fatal issues that compile fine but likely indicate mistakes
 	Macros       []Macro     // user-defined gate macros declared in this file, in source order
+	// Host is program-scope let and rejected assignment statements.
+	// It is not a list of quantum instructions and not PARAM names.
+	Host []HostDecl
+	// Functions are host functions. They are not gate macros and not IR ops.
+	Functions []FnDecl
+	// Quantum holds kernels. Calls are inlined into Instructions.
+	Quantum []QuantumFn
+	// Registers are statically sized qubit collections.
+	Registers []QubitRegister
+	// Observables are classical values beside the circuit, not IR ops.
+	Observables []ObservableDecl
 	// Local-sim noise (from NOISE directives). Compile targets ignore these.
 	NoiseDepolarizing     float64
 	NoiseAmplitudeDamping float64
 	NoisePhaseDamping     float64
+	NoiseBitFlip          float64
 	NoiseReadout          float64
 }
 
@@ -205,10 +219,17 @@ func Parse(src string) (*Circuit, error) {
 	var qubitDecls []QubitDecl // source order — a map here would lose ordering among names declared on the same line
 	nextNamedIdx := 0
 	paramSet := map[string]bool{}
+	var host []HostDecl
+	var fns []FnDecl
+	var quantum []QuantumFn
+	qfns := map[string]*QuantumFn{}
+	regs := map[string]QubitRegister{}
+	var observables []ObservableDecl
 	gateDefs := map[string]gateDef{}
 	noiseDep := 0.0
 	noiseAmp := 0.0
 	noisePhase := 0.0
+	noiseBit := 0.0
 	noiseReadout := 0.0
 
 	allLines := strings.Split(src, "\n")
@@ -227,9 +248,12 @@ func Parse(src string) (*Circuit, error) {
 		}
 
 		tokens := strings.Fields(line)
+		if word, ok := hostOnlyWord(tokens[0]); ok {
+			return nil, hostOnlyRejected(lineNum, word)
+		}
 		keyword := strings.ToUpper(tokens[0])
 
-		// NOISE depolarizing 0.01 | amplitude_damping | phase_damping | readout
+		// NOISE depolarizing 0.01 | amplitude_damping | phase_damping | bit_flip | readout
 		if keyword == "NOISE" {
 			if len(tokens) < 3 {
 				return nil, fmt.Errorf("line %d: NOISE expects <model> <rate> (e.g. NOISE depolarizing 0.01)", lineNum)
@@ -246,10 +270,12 @@ func Parse(src string) (*Circuit, error) {
 				noiseAmp = rate
 			case "phase_damping", "dephasing", "t2":
 				noisePhase = rate
+			case "bit_flip", "bitflip":
+				noiseBit = rate
 			case "readout", "readout_error", "spam":
 				noiseReadout = rate
 			default:
-				return nil, fmt.Errorf("line %d: unknown noise model %q (depolarizing|amplitude_damping|phase_damping|readout)", lineNum, tokens[1])
+				return nil, fmt.Errorf("line %d: unknown noise model %q (depolarizing|amplitude_damping|phase_damping|bit_flip|readout)", lineNum, tokens[1])
 			}
 			continue
 		}
@@ -296,6 +322,80 @@ func Parse(src string) (*Circuit, error) {
 			continue
 		}
 
+		if keyword == "OBSERVABLE" {
+			ob, err := parseObservable(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			for _, prev := range observables {
+				if prev.Name == ob.Name {
+					return nil, fmt.Errorf("line %d: duplicate observable %q", lineNum, ob.Name)
+				}
+			}
+			observables = append(observables, ob)
+			continue
+		}
+
+		if isQuantumFnLine(line) {
+			qfn, err := parseQuantumAt(allLines, &i, line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			if _, exists := qfns[qfn.Name]; exists {
+				return nil, fmt.Errorf("line %d: duplicate quantum fn %q", lineNum, qfn.Name)
+			}
+			cp := qfn
+			qfns[qfn.Name] = &cp
+			quantum = append(quantum, qfn)
+			continue
+		}
+		if isFnLine(line) {
+			if len(fns) >= MaxFunctions {
+				return nil, qerr.New(qerr.KindParse, qerr.Diagnostic{
+					Code: qerr.CodeLimit, Severity: qerr.SeverityError,
+					Message: fmt.Sprintf("more than %d host functions", MaxFunctions),
+					Line:    lineNum, Column: 1, EndLine: lineNum, EndColumn: 2,
+					SuggestedFix: "Split the program. Host functions are a single file-level list.",
+					DocsURL:      qerr.DocsHostFunctions,
+				})
+			}
+			fn, err := parseFunctionAt(allLines, &i, line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			fns = append(fns, fn)
+			continue
+		}
+		if isReturnLine(line) {
+			return nil, fnSyntax(lineNum, 1, 7, "return is only allowed inside fn", "Move return into a function body.")
+		}
+
+		// let name: type = expr — host local, not a gate and not a PARAM.
+		if keyword == "LET" || strings.HasPrefix(strings.ToLower(line), "let ") || strings.HasPrefix(strings.ToLower(line), "let\t") {
+			if len(host) >= MaxHostDecls {
+				return nil, qerr.New(qerr.KindParse, qerr.Diagnostic{
+					Code: qerr.CodeLimit, Severity: qerr.SeverityError,
+					Message: fmt.Sprintf("more than %d host declarations", MaxHostDecls),
+					Line:    lineNum, Column: 1, EndLine: lineNum, EndColumn: 2,
+					SuggestedFix: "Split the program. Phase 3 locals are a single file-level list.",
+				})
+			}
+			decl, err := parseHostLetAt(allLines, &i, line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			host = append(host, decl)
+			continue
+		}
+
+		if decl, ok, err := parseAssignLine(line, lineNum); ok {
+			if err != nil {
+				return nil, err
+			}
+			host = append(host, decl)
+			continue
+		}
+
 		// FOR i IN 0..3 { … } — inclusive range, unrolled at parse time
 		if keyword == "FOR" {
 			m := forHeadRe.FindStringSubmatch(line)
@@ -320,6 +420,9 @@ func Parse(src string) (*Circuit, error) {
 				sub, err := Parse(expanded)
 				if err != nil {
 					return nil, fmt.Errorf("line %d: FOR body (i=%d): %w", lineNum, v, err)
+				}
+				if err := noNestedHost(sub, lineNum, "FOR"); err != nil {
+					return nil, err
 				}
 				for _, inst := range sub.Instructions {
 					for _, q := range inst.Qubits {
@@ -355,6 +458,9 @@ func Parse(src string) (*Circuit, error) {
 			bodyCirc, err := Parse(strings.Join(bodyLines, "\n") + "\n")
 			if err != nil {
 				return nil, fmt.Errorf("line %d: WHILE body: %w", lineNum, err)
+			}
+			if err := noNestedHost(bodyCirc, lineNum, "WHILE"); err != nil {
+				return nil, err
 			}
 			for _, inst := range bodyCirc.Instructions {
 				if inst.Gate == "WHILE" {
@@ -413,6 +519,9 @@ func Parse(src string) (*Circuit, error) {
 			bodyCirc, err := Parse(strings.Join(bodyLines, "\n") + "\n")
 			if err != nil {
 				return nil, fmt.Errorf("line %d: PAR body: %w", lineNum, err)
+			}
+			if err := noNestedHost(bodyCirc, lineNum, "PAR"); err != nil {
+				return nil, err
 			}
 			seenQ := map[int]bool{}
 			for j := range bodyCirc.Instructions {
@@ -488,7 +597,13 @@ func Parse(src string) (*Circuit, error) {
 			}
 		}
 
-		// IF — block form or line form
+		// Lowercase if is a host conditional, never QPU IF and never a gate.
+		if isHostIfStatement(line) {
+			return nil, hostIfStatementRejected(lineNum)
+		}
+
+		// IF — block form or line form. Only uppercase IF (and other casings
+		// that are not the exact keyword "if") stay on this path.
 		if keyword == "IF" {
 			if m := ifBlockHeadRe.FindStringSubmatch(line); m != nil {
 				cbit, eq, rightBit, err := parseCond(m[1])
@@ -502,6 +617,9 @@ func Parse(src string) (*Circuit, error) {
 				thenCirc, err := Parse(strings.Join(thenLines, "\n") + "\n")
 				if err != nil {
 					return nil, fmt.Errorf("line %d: IF then-body: %w", lineNum, err)
+				}
+				if err := noNestedHost(thenCirc, lineNum, "IF"); err != nil {
+					return nil, err
 				}
 				for j := range thenCirc.Instructions {
 					if thenCirc.Instructions[j].Gate == "MEASURE" {
@@ -528,6 +646,9 @@ func Parse(src string) (*Circuit, error) {
 						elseCirc, err := Parse(strings.Join(elseLines, "\n") + "\n")
 						if err != nil {
 							return nil, fmt.Errorf("line %d: ELSE body: %w", lineNum, err)
+						}
+						if err := noNestedHost(elseCirc, lineNum, "ELSE"); err != nil {
+							return nil, err
 						}
 						for j := range elseCirc.Instructions {
 							if elseCirc.Instructions[j].Gate == "MEASURE" {
@@ -559,6 +680,9 @@ func Parse(src string) (*Circuit, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: IF body: %w", lineNum, err)
 			}
+			if err := noNestedHost(bodyCirc, lineNum, "IF"); err != nil {
+				return nil, err
+			}
 			if len(bodyCirc.Instructions) != 1 {
 				return nil, fmt.Errorf("line %d: IF line-form body must be a single gate", lineNum)
 			}
@@ -580,6 +704,29 @@ func Parse(src string) (*Circuit, error) {
 			for _, tok := range tokens[1:] {
 				name := strings.Trim(tok, ", \t")
 				if name == "" {
+					continue
+				}
+				if baseName, n, ok := splitRegister(name); ok {
+					if n > maxQubitRegister {
+						return nil, fmt.Errorf("line %d: QL2602: qubit register %s[%d] exceeds the limit of %d", lineNum, baseName, n, maxQubitRegister)
+					}
+					if _, exists := regs[baseName]; exists {
+						return nil, fmt.Errorf("line %d: duplicate qubit register %q", lineNum, baseName)
+					}
+					if _, exists := namedQubits[baseName]; exists {
+						return nil, fmt.Errorf("line %d: qubit register %q hides an existing qubit", lineNum, baseName)
+					}
+					reg := QubitRegister{Name: baseName, Size: n, Base: nextNamedIdx, Line: lineNum}
+					for k := 0; k < n; k++ {
+						slot := fmt.Sprintf("%s[%d]", baseName, k)
+						namedQubits[slot] = nextNamedIdx
+						qubitDecls = append(qubitDecls, QubitDecl{Name: slot, Line: lineNum})
+						if nextNamedIdx > maxQubit {
+							maxQubit = nextNamedIdx
+						}
+						nextNamedIdx++
+					}
+					regs[baseName] = reg
 					continue
 				}
 				if _, exists := namedQubits[name]; !exists {
@@ -619,6 +766,9 @@ func Parse(src string) (*Circuit, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: expanding gate %s: %w", lineNum, gate, err)
 			}
+			if err := noNestedHost(sub, lineNum, "gate"); err != nil {
+				return nil, err
+			}
 			for _, inst := range sub.Instructions {
 				for _, q := range inst.Qubits {
 					if q > maxQubit {
@@ -631,6 +781,22 @@ func Parse(src string) (*Circuit, error) {
 					}
 				}
 				inst.Line = lineNum
+				instructions = append(instructions, inst)
+			}
+			continue
+		}
+
+		if _, ok := qfns[tokens[0]]; ok || isQuantumModifier(tokens[0]) {
+			insts, err := lowerQuantumStatement(tokens, qfns, nil, namedQubits, regs, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			for _, inst := range insts {
+				for _, q := range inst.Qubits {
+					if q > maxQubit {
+						maxQubit = q
+					}
+				}
 				instructions = append(instructions, inst)
 			}
 			continue
@@ -729,7 +895,7 @@ func Parse(src string) (*Circuit, error) {
 		})
 	}
 
-	if len(instructions) == 0 {
+	if len(instructions) == 0 && len(host) == 0 && len(fns) == 0 {
 		return nil, fmt.Errorf("empty circuit: no gate instructions found")
 	}
 
@@ -759,9 +925,15 @@ func Parse(src string) (*Circuit, error) {
 		Params:                params,
 		Warnings:              warnings,
 		Macros:                macros,
+		Host:                  host,
+		Functions:             fns,
+		Quantum:               quantum,
+		Registers:             registerSlice(regs),
+		Observables:           observables,
 		NoiseDepolarizing:     noiseDep,
 		NoiseAmplitudeDamping: noiseAmp,
 		NoisePhaseDamping:     noisePhase,
+		NoiseBitFlip:          noiseBit,
 		NoiseReadout:          noiseReadout,
 	}, nil
 }
@@ -1135,6 +1307,9 @@ func parseSwitchCases(bodyLines []string, lineNum int, maxQubit *int, paramSet m
 			circ, err := Parse(src + "\n")
 			if err != nil {
 				return fmt.Errorf("line %d: SWITCH case body: %w", lineNum, err)
+			}
+			if err := noNestedHost(circ, lineNum, "SWITCH"); err != nil {
+				return err
 			}
 			for j := range circ.Instructions {
 				g := circ.Instructions[j].Gate

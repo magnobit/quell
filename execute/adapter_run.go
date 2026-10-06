@@ -6,14 +6,15 @@ import (
 	"fmt"
 
 	"github.com/magnobit/quell/adapter"
+	"github.com/magnobit/quell/internal/check"
 	"github.com/magnobit/quell/internal/ir"
 	"github.com/magnobit/quell/internal/parser"
 )
 
 // RunOpts configures an IR-based adapter run.
 type RunOpts struct {
-	Optimize    bool
-	Shots       int
+	Optimize     bool
+	Shots        int
 	QuellSource  string // required for NVIDIA/Intel fallback when Config has no Extra
 	Noise        any
 	Coupling     [][2]int
@@ -29,6 +30,9 @@ func RunQuell(backend, quellSource string, cfg any, opts RunOpts) (*Result, erro
 	circ, err := parser.Parse(quellSource)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
+	}
+	if err := check.Fail(circ); err != nil {
+		return nil, err
 	}
 	prog := ir.Lower(circ)
 	name := backend

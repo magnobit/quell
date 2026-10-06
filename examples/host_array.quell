@@ -1,0 +1,10 @@
+fn total(xs: int[]) -> int {
+    var s: int = 0
+    for i in 0..len(xs) - 1 {
+        s = s + xs[i]
+    }
+    return s
+}
+let n: int = total([1, 2, 3])
+H 0
+MEASURE

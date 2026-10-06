@@ -3,6 +3,9 @@
 package compile
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"sort"
 
 	"github.com/magnobit/quell/internal/ir"
@@ -14,10 +17,28 @@ import (
 // create time. They name the IR/compiler/optimizer *schema*, not a
 // mutable "whatever this process happens to be running later."
 const (
+	// LanguageVersion is the Quell source language documented in SPEC.md.
+	// It is not the CLI version in cmd/quell/root.go and not the IR schema.
+	LanguageVersion  = "0.10.0"
 	IRVersion        = ir.CanonicalVersion
 	CompilerVersion  = "quell-compiler-v1"
 	OptimizerVersion = "quell-optimizer-v1"
 )
+
+// Fingerprint is a stable id for a compile of source to one target.
+// It covers language, compiler schema, optimizer schema, IR schema,
+// target name, whether optimization is on, and the exact source bytes.
+// It does not include credentials, provider responses, or live job state.
+// Callers may use it as a cache key. This package does not store a cache:
+// local compile of current circuits is cheaper than a cache lookup until
+// a benchmark shows otherwise.
+func Fingerprint(source, target string, optimize bool) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf(
+		"language=%s\ncompiler=%s\noptimizer=%s\nir=%s\ntarget=%s\noptimize=%t\nsource=%s",
+		LanguageVersion, CompilerVersion, OptimizerVersion, IRVersion, target, optimize, source,
+	)))
+	return hex.EncodeToString(sum[:])
+}
 
 // ParamBinding is one named input used (or declared) by a parameterized circuit.
 type ParamBinding struct {

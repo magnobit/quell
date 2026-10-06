@@ -62,6 +62,17 @@ func TestMacrosIn_FallsBackWhenUnparseable(t *testing.T) {
 	}
 }
 
+func TestFindLocal(t *testing.T) {
+	text := "let shots: int = 1000\nH 0\nMEASURE\n"
+	h, ok := findLocal(text, "shots")
+	if !ok || h.Type != "int" || h.Line != 1 {
+		t.Fatalf("%+v %v", h, ok)
+	}
+	if _, ok := findLocal(text, "missing"); ok {
+		t.Fatal("unexpected local")
+	}
+}
+
 func TestFindMacro_CaseInsensitive(t *testing.T) {
 	text := "gate Bell a b {\n  H a\n}\n\nBell 0 1\nMEASURE\n"
 	m, ok := findMacro(text, "bell")
@@ -295,6 +306,32 @@ func TestDefinition_Import(t *testing.T) {
 	gotURI, _ := result["uri"].(string)
 	if gotURI != pathToURI(target) {
 		t.Errorf("import definition uri = %q, want %q", gotURI, pathToURI(target))
+	}
+}
+
+func TestDefinition_ImportedMacro(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "lib.quell")
+	if err := os.WriteFile(lib, []byte("gate bell a b {\n  H a\n  CNOT a b\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(dir, "main.quell")
+	src := "import \"./lib.quell\"\nbell 0 1\nMEASURE\n"
+	c := startServer(t)
+	c.openDoc(pathToURI(mainPath), src)
+	resp := c.send(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "textDocument/definition",
+		"params": map[string]any{
+			"textDocument": map[string]any{"uri": pathToURI(mainPath)},
+			"position":     map[string]any{"line": 1, "character": 1},
+		},
+	})
+	result, _ := resp["result"].(map[string]any)
+	if result == nil {
+		t.Fatal("expected a definition in the imported file")
+	}
+	if result["uri"] != pathToURI(lib) {
+		t.Fatalf("uri %v", result["uri"])
 	}
 }
 
@@ -536,5 +573,61 @@ func TestRename_RejectsNameCollisionForQubit(t *testing.T) {
 	})
 	if resp["error"] == nil {
 		t.Errorf("expected an error renaming alice to an already-existing qubit name \"bob\", got result: %v", resp["result"])
+	}
+}
+
+func TestBranchLocalBinding(t *testing.T) {
+	text := strings.Join([]string{
+		"fn f(x: int) -> int {",
+		"    return if x > 0 {",
+		"        let y: int = x + 1",
+		"        y",
+		"    } else {",
+		"        let y: int = 0",
+		"        y",
+		"    }",
+		"}",
+		"H 0",
+		"MEASURE",
+		"",
+	}, "\n")
+	thenUse, ok := bindingAt(text, position{Line: 3, Character: 8}, "y")
+	if !ok || thenUse.line != 3 {
+		t.Fatalf("then binding: %+v %v", thenUse, ok)
+	}
+	elseUse, ok := bindingAt(text, position{Line: 6, Character: 8}, "y")
+	if !ok || elseUse.line != 6 || elseUse.line == thenUse.line {
+		t.Fatalf("else binding: %+v", elseUse)
+	}
+	if thenUse.blockEnd == 0 || elseUse.blockLine <= thenUse.blockEnd && elseUse.blockLine >= thenUse.blockLine {
+		t.Fatalf("ranges overlap: then %+v else %+v", thenUse, elseUse)
+	}
+}
+
+func TestStmtBranchLocalBinding(t *testing.T) {
+	text := strings.Join([]string{
+		"fn f(y: int) -> int {",
+		"    if y < 0 {",
+		"        let y: int = 4",
+		"        return y",
+		"    } else {",
+		"        let y: int = y + 1",
+		"        return y",
+		"    }",
+		"}",
+		"H 0",
+		"MEASURE",
+		"",
+	}, "\n")
+	thenUse, ok := bindingAt(text, position{Line: 3, Character: 16}, "y")
+	if !ok || thenUse.line != 3 {
+		t.Fatalf("then binding: %+v %v", thenUse, ok)
+	}
+	elseUse, ok := bindingAt(text, position{Line: 6, Character: 16}, "y")
+	if !ok || elseUse.line != 6 {
+		t.Fatalf("else binding: %+v %v", elseUse, ok)
+	}
+	if thenUse.blockEnd == 0 || (elseUse.blockLine <= thenUse.blockEnd && elseUse.blockLine >= thenUse.blockLine) {
+		t.Fatalf("ranges overlap: then %+v else %+v", thenUse, elseUse)
 	}
 }

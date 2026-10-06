@@ -27,6 +27,9 @@ func ToQuell(p *ir.Program) string {
 	if p.NoisePhaseDamping > 0 {
 		fmt.Fprintf(&b, "NOISE phase_damping %g\n", p.NoisePhaseDamping)
 	}
+	if p.NoiseBitFlip > 0 {
+		fmt.Fprintf(&b, "NOISE bit_flip %g\n", p.NoiseBitFlip)
+	}
 	if p.NoiseReadout > 0 {
 		fmt.Fprintf(&b, "NOISE readout %g\n", p.NoiseReadout)
 	}

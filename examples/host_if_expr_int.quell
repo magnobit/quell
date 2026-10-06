@@ -1,0 +1,10 @@
+fn sign(x: int) -> int {
+    return if x < 0 {
+        -1
+    } else {
+        1
+    }
+}
+let s: int = sign(-4)
+H 0
+MEASURE

@@ -75,6 +75,45 @@ func TestNoise_PhaseDamping(t *testing.T) {
 	}
 }
 
+func TestNoise_BitFlipFlipsDeterministicState(t *testing.T) {
+	// X then MEASURE is always "1" when ideal. A bit-flip after the gate
+	// turns some shots into "0"; probability 1 turns all of them.
+	src := "X 0\nMEASURE\n"
+	ideal, err := RunProgramOpts(mustLower(t, src), Options{Shots: 200, Seed: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ideal.Counts["1"] != 200 {
+		t.Fatalf("ideal %v", ideal.Counts)
+	}
+	some, err := RunProgramOpts(mustLower(t, src), Options{Shots: 400, Seed: 1, Noise: NoiseModel{BitFlip: 0.3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if some.Counts["0"] == 0 || some.Counts["1"] == 0 {
+		t.Fatalf("bit_flip=0.3 should mix outcomes, got %v", some.Counts)
+	}
+	all, err := RunProgramOpts(mustLower(t, src), Options{Shots: 100, Seed: 1, Noise: NoiseModel{BitFlip: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.Counts["0"] != 100 {
+		t.Fatalf("bit_flip=1 should always flip, got %v", all.Counts)
+	}
+}
+
+func TestParseNoiseFlag_BitFlipAliasesAndRange(t *testing.T) {
+	for _, s := range []string{"bit_flip=0.1", "bit-flip=0.1", "bitflip:0.1"} {
+		n, err := ParseNoiseFlag(s)
+		if err != nil || n.BitFlip != 0.1 {
+			t.Fatalf("%s: %+v %v", s, n, err)
+		}
+	}
+	if _, err := ParseNoiseFlag("bit_flip=1.5"); err == nil {
+		t.Fatal("out-of-range bit_flip must fail")
+	}
+}
+
 func mustLower(t *testing.T, src string) *ir.Program {
 	t.Helper()
 	c, err := parser.Parse(src)
