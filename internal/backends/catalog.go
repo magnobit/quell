@@ -43,11 +43,12 @@ func Catalog() []CatalogEntry {
 		{ID: "dwave", Label: "D-Wave", ExecutionModel: estimate.ExecAnnealing, Status: "live", Qubits: 5000, Description: "QUBO via Leap (Ocean) or local simulated annealing -- use `quell anneal run`, not gate-model Quell"},
 		{ID: "nvidia", Label: "NVIDIA cuQuantum / CUDA-Q", ExecutionModel: estimate.ExecSimulation, Status: "live", Description: "CUDA-Q when installed; otherwise local statevector fallback"},
 		{ID: "intel", Label: "Intel Quantum SDK", ExecutionModel: estimate.ExecSimulation, Status: "live", Description: "Local statevector today; Intel SDK bridge when QUELL_INTEL_SDK=1"},
-		{ID: "quantinuum", Label: "Quantinuum", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Trapped-ion H-series -- often via Azure Quantum today"},
-		{ID: "quera", Label: "QuEra Aquila", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Neutral-atom analog / digital -- often via AWS Braket"},
-		{ID: "pasqal", Label: "Pasqal", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Neutral-atom processors"},
-		{ID: "iqm", Label: "IQM Resonance", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Superconducting QPUs (Europe)"},
-		{ID: "oqc", Label: "Oxford Quantum Circuits", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Superconducting -- often via AWS Braket"},
+		{ID: "quantinuum", Label: "Quantinuum", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Trapped-ion H-series -- runs through Azure Quantum; no direct adapter"},
+		{ID: "quera", Label: "QuEra Aquila", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Neutral-atom analog (AHS) only -- Quell gate circuits cannot target it"},
+		{ID: "pasqal", Label: "Pasqal", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Neutral-atom -- runs through Azure Quantum; no direct adapter"},
+		{ID: "iqm", Label: "IQM", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Superconducting -- runs through AWS Braket in eu-north-1; no direct adapter"},
+		{ID: "aqt", Label: "AQT", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Trapped-ion -- runs through AWS Braket when the region lists an AQT device"},
+		{ID: "oqc", Label: "Oxford Quantum Circuits", ExecutionModel: estimate.ExecGate, Status: "planned", Description: "Superconducting -- runs through AWS Braket when the region lists an OQC device"},
 		{ID: "xanadu", Label: "Xanadu / PennyLane", ExecutionModel: estimate.ExecSimulation, Status: "planned", Description: "Photonic + differentiable simulators"},
 	}
 	for i := range entries {
